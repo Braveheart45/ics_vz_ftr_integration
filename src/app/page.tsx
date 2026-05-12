@@ -2,7 +2,7 @@
 
 import { LeftPanel } from '@/components/split/left-panel';
 import { RightPanel } from '@/components/split/right-panel';
-import { Database, RotateCcw, Zap } from 'lucide-react';
+import { Database, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   Tooltip,
@@ -18,17 +18,17 @@ export default function Home() {
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-background">
       {/* ── Header ─────────────────────────────────────────── */}
-      <header className="flex h-12 shrink-0 items-center justify-between border-b border-border/60 bg-background/80 px-5 backdrop-blur-md supports-[backdrop-filter]:bg-background/60">
+      <header className="flex h-12 shrink-0 items-center justify-between border-b border-white/[0.06] bg-[#1B2D4F] px-5 shadow-[0_1px_3px_0_oklch(0_0_0/0.12)]">
         {/* Left: Branding */}
         <div className="flex items-center gap-3">
-          <div className="relative flex size-7 items-center justify-center rounded-lg bg-primary shadow-[0_1px_2px_0_oklch(0.55_0.15_264/0.3)]">
-            <Database className="size-3.5 text-primary-foreground" />
+          <div className="relative flex size-7 items-center justify-center rounded-lg bg-[#F97316] shadow-[0_1px_3px_0_oklch(0.65_0.2_45/0.35)]">
+            <Database className="size-3.5 text-white" />
           </div>
           <div className="flex items-baseline gap-2">
-            <span className="text-[13px] font-semibold tracking-[-0.01em] text-foreground">
+            <span className="text-[13px] font-semibold tracking-[-0.01em] text-white">
               SQLForge
             </span>
-            <span className="hidden text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground/60 sm:inline">
+            <span className="hidden text-[10px] font-medium uppercase tracking-[0.08em] text-white/50 sm:inline">
               Agent
             </span>
           </div>
@@ -36,12 +36,12 @@ export default function Home() {
 
         {/* Center: Session */}
         <div className="hidden items-center gap-2 md:flex">
-          <div className="flex items-center gap-1.5 rounded-full border border-border/50 bg-secondary/50 px-2.5 py-1">
+          <div className="flex items-center gap-1.5 rounded-full border border-white/[0.08] bg-white/[0.06] px-2.5 py-1">
             <span className="relative flex size-1.5">
-              <span className="absolute inline-flex size-full animate-ping rounded-full bg-amber-400 opacity-60" />
-              <span className="relative inline-flex size-1.5 rounded-full bg-amber-500" />
+              <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400 opacity-60" />
+              <span className="relative inline-flex size-1.5 rounded-full bg-emerald-500" />
             </span>
-            <span className="text-[10px] font-mono tabular-nums text-muted-foreground/70">
+            <span className="text-[10px] font-mono tabular-nums text-white/50">
               {sessionId.slice(0, 8)}
             </span>
           </div>
@@ -53,7 +53,7 @@ export default function Home() {
             <Button
               variant="ghost"
               size="icon"
-              className="size-8 text-muted-foreground/60 hover:text-foreground hover:bg-secondary"
+              className="size-8 text-white/50 hover:text-white hover:bg-white/[0.08]"
               onClick={() => resetSession()}
             >
               <RotateCcw className="size-3.5" />
