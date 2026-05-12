@@ -110,7 +110,7 @@ export function InputSection() {
 
   return (
     <div className="flex flex-col gap-4 animate-fade-in-up" style={{ animationDelay: '100ms' }}>
-      {/* Jira + Story + BigQuery — all on same row */}
+      {/* Jira Project, Story No. & BigQuery Project */}
       <JiraInput />
 
       {/* Divider */}

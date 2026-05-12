@@ -10,7 +10,6 @@ import {
   Minimize2,
   RefreshCw,
   Rocket,
-  Code,
   FileCode2,
   Terminal,
 } from 'lucide-react';
