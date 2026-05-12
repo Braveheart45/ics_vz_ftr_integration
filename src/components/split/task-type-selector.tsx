@@ -43,7 +43,7 @@ export function TaskTypeSelector() {
                 'relative flex items-center justify-center gap-1.5 rounded-lg px-3.5 py-1.5 text-[11px] font-medium tracking-[-0.01em] transition-all duration-200',
                 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1',
                 isActive
-                  ? 'bg-primary text-primary-foreground shadow-[0_1px_3px_0_oklch(0.22_0.012_60/0.25)]'
+                  ? 'bg-primary text-primary-foreground shadow-[0_1px_3px_0_oklch(0.55_0.15_264/0.25)]'
                   : 'text-muted-foreground/70 hover:text-muted-foreground'
               )}
               aria-pressed={isActive}

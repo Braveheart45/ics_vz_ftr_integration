@@ -59,9 +59,9 @@ export function PipelineTracker() {
                   className={cn(
                     'flex items-center justify-center size-6 rounded-full transition-all duration-300',
                     isCompleted
-                      ? 'bg-primary text-primary-foreground shadow-[0_1px_2px_0_oklch(0.22_0.012_60/0.2)]'
+                      ? 'bg-primary text-primary-foreground shadow-[0_1px_2px_0_oklch(0.55_0.15_264/0.2)]'
                       : isCurrent
-                        ? 'bg-primary text-primary-foreground shadow-[0_1px_3px_0_oklch(0.22_0.012_60/0.25),0_0_0_3px_oklch(0.22_0.012_60/0.12)]'
+                        ? 'bg-primary text-primary-foreground shadow-[0_1px_3px_0_oklch(0.55_0.15_264/0.25),0_0_0_3px_oklch(0.55_0.15_264/0.12)]'
                         : 'bg-muted/70 text-muted-foreground/35'
                   )}
                 >

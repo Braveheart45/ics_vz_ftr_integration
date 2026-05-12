@@ -50,7 +50,7 @@ function MessageBubble({
         className={cn(
           'mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full',
           isUser
-            ? 'bg-primary text-primary-foreground shadow-[0_1px_2px_0_oklch(0.22_0.012_60/0.2)]'
+            ? 'bg-primary text-primary-foreground shadow-[0_1px_2px_0_oklch(0.55_0.15_264/0.2)]'
             : 'bg-secondary text-muted-foreground shadow-[0_1px_2px_0_oklch(0_0_0/0.04)]'
         )}
       >
@@ -63,7 +63,7 @@ function MessageBubble({
           className={cn(
             'rounded-2xl px-3.5 py-2.5 text-[13px] leading-relaxed transition-colors',
             isUser
-              ? 'rounded-tr-md bg-primary text-primary-foreground shadow-[0_1px_3px_0_oklch(0.22_0.012_60/0.15)]'
+              ? 'rounded-tr-md bg-primary text-primary-foreground shadow-[0_1px_3px_0_oklch(0.55_0.15_264/0.15)]'
               : 'rounded-tl-md bg-secondary/80 text-foreground shadow-[0_1px_2px_0_oklch(0_0_0/0.03)]'
           )}
         >
@@ -230,7 +230,7 @@ export function ChatPanel() {
             size="icon"
             onClick={sendFollowUp}
             disabled={!followUp.trim() || isSending}
-            className="shrink-0 size-9 rounded-lg shadow-[0_1px_3px_0_oklch(0.22_0.012_60/0.15)]"
+            className="shrink-0 size-9 rounded-lg shadow-[0_1px_3px_0_oklch(0.55_0.15_264/0.15)]"
           >
             {isSending ? (
               <Loader2 className="size-3.5 animate-spin" />

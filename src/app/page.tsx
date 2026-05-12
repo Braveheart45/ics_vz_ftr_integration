@@ -21,7 +21,7 @@ export default function Home() {
       <header className="flex h-12 shrink-0 items-center justify-between border-b border-border/60 bg-background/80 px-5 backdrop-blur-md supports-[backdrop-filter]:bg-background/60">
         {/* Left: Branding */}
         <div className="flex items-center gap-3">
-          <div className="relative flex size-7 items-center justify-center rounded-lg bg-primary shadow-[0_1px_2px_0_oklch(0.22_0.012_60/0.3)]">
+          <div className="relative flex size-7 items-center justify-center rounded-lg bg-primary shadow-[0_1px_2px_0_oklch(0.55_0.15_264/0.3)]">
             <Database className="size-3.5 text-primary-foreground" />
           </div>
           <div className="flex items-baseline gap-2">

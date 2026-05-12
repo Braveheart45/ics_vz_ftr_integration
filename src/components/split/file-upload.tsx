@@ -87,7 +87,7 @@ export function FileUpload() {
         className={cn(
           'flex cursor-pointer flex-col items-center justify-center gap-1.5 rounded-lg border transition-all duration-200',
           isDragOver
-            ? 'border-primary/30 bg-primary/[0.03] shadow-[0_0_0_1px_oklch(0.22_0.012_60/0.1)]'
+            ? 'border-primary/30 bg-primary/[0.03] shadow-[0_0_0_1px_oklch(0.55_0.15_264/0.1)]'
             : 'border-border hover:border-muted-foreground/25 hover:bg-secondary/30'
         )}
       >

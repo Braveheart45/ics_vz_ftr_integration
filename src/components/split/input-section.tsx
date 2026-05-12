@@ -126,7 +126,7 @@ export function InputSection() {
       <Button
         onClick={handleSubmit}
         disabled={isSubmitting}
-        className="w-full h-9.5 font-medium tracking-[-0.01em] shadow-[0_1px_3px_0_oklch(0.22_0.012_60/0.2),inset_0_1px_0_0_oklch(1_0_0/0.1)]"
+        className="w-full h-9.5 font-medium tracking-[-0.01em] shadow-[0_1px_3px_0_oklch(0.55_0.15_264/0.2),inset_0_1px_0_0_oklch(1_0_0/0.1)]"
         size="default"
       >
         {isSubmitting ? (
