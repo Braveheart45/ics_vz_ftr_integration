@@ -62,7 +62,7 @@ export function PipelineTracker() {
                       ? 'bg-primary text-primary-foreground shadow-[0_1px_2px_0_oklch(0.55_0.15_264/0.2)] hover:scale-110'
                       : isCurrent
                         ? 'bg-primary text-primary-foreground animate-pulse-ring shadow-[0_1px_3px_0_oklch(0.55_0.15_264/0.25)]'
-                        : 'bg-muted/70 text-muted-foreground/35 group-hover:bg-muted group-hover:text-muted-foreground/50 transition-colors'
+                        : 'bg-muted/70 text-muted-foreground/50 group-hover:bg-muted group-hover:text-muted-foreground/70 transition-colors'
                   )}
                 >
                   {isCompleted ? (
@@ -75,10 +75,10 @@ export function PipelineTracker() {
                   className={cn(
                     'text-[9px] leading-none font-semibold tracking-[0.01em] whitespace-nowrap hidden md:block transition-colors duration-300',
                     isCompleted
-                      ? 'text-primary/60'
+                      ? 'text-primary/70'
                       : isCurrent
                         ? 'text-primary font-bold'
-                        : 'text-muted-foreground/35 group-hover:text-muted-foreground/50'
+                        : 'text-muted-foreground/55 group-hover:text-muted-foreground/70'
                   )}
                 >
                   {stage.shortLabel}

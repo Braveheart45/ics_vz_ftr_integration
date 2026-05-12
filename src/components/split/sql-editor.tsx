@@ -259,10 +259,10 @@ export function SqlEditor() {
               <div className="absolute -bottom-2 -right-2 size-1.5 rounded-full bg-[#F97316]/20 animate-ping" style={{ animationDelay: '1s' }} />
             </div>
             <div className="mt-4 animate-fade-in-up flex flex-col gap-1.5" style={{ animationDelay: '200ms' }}>
-              <p className="text-sm font-medium text-foreground/60">
+              <p className="text-sm font-medium text-foreground/70">
                 Generated SQL will appear here
               </p>
-              <p className="text-xs text-muted-foreground/40">
+              <p className="text-xs text-muted-foreground/55">
                 Submit your requirements to get started
               </p>
             </div>

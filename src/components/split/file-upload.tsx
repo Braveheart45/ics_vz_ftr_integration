@@ -98,10 +98,10 @@ export function FileUpload() {
         )}>
           <Upload className="size-3.5 text-muted-foreground/60" />
         </div>
-        <span className="text-xs text-muted-foreground/70">
-          Drop files here or <span className="font-medium text-foreground/70">browse</span>
+        <span className="text-xs text-muted-foreground/80">
+          Drop files here or <span className="font-semibold text-foreground/80">browse</span>
         </span>
-        <span className="text-[10px] text-muted-foreground/35 tracking-wide">
+        <span className="text-[10px] text-muted-foreground/50 tracking-wide">
           {SUPPORTED_FORMATS.join(' · ')}
         </span>
         <input

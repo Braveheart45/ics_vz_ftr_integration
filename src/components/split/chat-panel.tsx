@@ -178,10 +178,10 @@ export function ChatPanel() {
             </div>
 
             <div className="animate-fade-in-up flex flex-col gap-1.5" style={{ animationDelay: '150ms' }}>
-              <h3 className="text-sm font-semibold tracking-[-0.01em] text-foreground/80">
+              <h3 className="text-sm font-semibold tracking-[-0.01em] text-foreground">
                 SQLForge Assistant
               </h3>
-              <p className="max-w-[220px] text-xs text-muted-foreground/55 leading-relaxed">
+              <p className="max-w-[240px] text-xs text-muted-foreground/70 leading-relaxed">
                 Provide requirements above or type a message to begin.
               </p>
             </div>
@@ -222,7 +222,7 @@ export function ChatPanel() {
               onChange={(e) => setFollowUp(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="Follow up or clarify..."
-              className="min-h-[38px] max-h-[100px] resize-none text-sm leading-relaxed placeholder:text-muted-foreground/40 pr-10"
+              className="min-h-[38px] max-h-[100px] resize-none text-sm leading-relaxed placeholder:text-muted-foreground/55 pr-10"
               rows={1}
               aria-label="Follow-up message"
             />

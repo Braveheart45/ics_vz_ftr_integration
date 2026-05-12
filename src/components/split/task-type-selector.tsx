@@ -11,17 +11,17 @@ const segments: { value: TaskType; label: string; icon: React.ReactNode }[] = [
   {
     value: 'auto_detect',
     label: 'Auto-detect',
-    icon: <Sparkles className="size-3" />,
+    icon: <Sparkles className="size-3.5" />,
   },
   {
     value: 'sql_generation',
     label: 'Generate',
-    icon: <Code className="size-3" />,
+    icon: <Code className="size-3.5" />,
   },
   {
     value: 'legacy_sql_conversion',
     label: 'Convert',
-    icon: <ArrowLeftRight className="size-3" />,
+    icon: <ArrowLeftRight className="size-3.5" />,
   },
 ];
 
@@ -55,7 +55,7 @@ export function TaskTypeSelector() {
       >
         {/* Sliding indicator pill */}
         <div
-          className="absolute top-1 z-0 h-[calc(100%-8px)] rounded-lg bg-primary text-primary-foreground shadow-[0_1px_3px_0_oklch(0.55_0.15_264/0.25)] transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
+          className="absolute top-1 z-0 h-[calc(100%-8px)] rounded-lg bg-[#F97316] text-white shadow-[0_1px_4px_0_oklch(0.65_0.2_45/0.3)] transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
           style={indicatorStyle}
         />
 
@@ -72,8 +72,8 @@ export function TaskTypeSelector() {
                 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1',
                 'hover:scale-[1.02] active:scale-[0.97]',
                 isActive
-                  ? 'text-primary-foreground'
-                  : 'text-muted-foreground/70 hover:text-muted-foreground'
+                  ? 'text-white'
+                  : 'text-[#F97316] hover:text-[#EA580C]'
               )}
               aria-pressed={isActive}
               title={seg.label}

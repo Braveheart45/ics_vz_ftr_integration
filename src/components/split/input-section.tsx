@@ -99,9 +99,9 @@ export function InputSection() {
     <div className="flex flex-col gap-4 animate-fade-in-up" style={{ animationDelay: '100ms' }}>
       {/* Jira Story (optional) */}
       <div className="flex flex-col gap-1.5">
-        <Label className="text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground/70">
+        <Label className="text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
           Jira Story
-          <span className="ml-1.5 text-[10px] font-normal normal-case tracking-normal text-muted-foreground/40">
+          <span className="ml-1.5 text-[10px] font-normal normal-case tracking-normal text-muted-foreground/60">
             optional
           </span>
         </Label>
@@ -111,7 +111,7 @@ export function InputSection() {
       {/* Divider */}
       <div className="flex items-center gap-3">
         <div className="h-px flex-1 bg-gradient-to-r from-transparent via-border to-transparent" />
-        <span className="text-[10px] font-medium text-muted-foreground/40 uppercase tracking-[0.1em]">
+        <span className="text-[10px] font-medium text-muted-foreground/60 uppercase tracking-[0.1em]">
           or
         </span>
         <div className="h-px flex-1 bg-gradient-to-r from-transparent via-border to-transparent" />
