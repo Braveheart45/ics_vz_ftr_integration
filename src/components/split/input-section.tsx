@@ -8,7 +8,6 @@ import { FileUpload } from './file-upload';
 import { ContextInput } from './context-input';
 import { Sparkles, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
-import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
 
 // ── Component ─────────────────────────────────────────────────
@@ -53,6 +52,12 @@ export function InputSection() {
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleSubmit = useCallback(async () => {
+    // Mandatory: BigQuery project
+    if (!bqProjectInput.projectId.trim()) {
+      toast.error('BigQuery Project is required. Please select a project.');
+      return;
+    }
+
     const userContent = buildUserMessage();
     if (!userContent) {
       toast.error('Please provide some input before submitting.');
@@ -105,13 +110,8 @@ export function InputSection() {
 
   return (
     <div className="flex flex-col gap-4 animate-fade-in-up" style={{ animationDelay: '100ms' }}>
-      {/* Jira Story (optional) */}
-      <div className="flex flex-col gap-1.5">
-        <Label className="text-[11px] font-bold uppercase tracking-[0.06em] text-foreground">
-          Jira Story
-        </Label>
-        <JiraInput />
-      </div>
+      {/* Jira + Story + BigQuery — all on same row */}
+      <JiraInput />
 
       {/* Divider */}
       <div className="flex items-center gap-3">
