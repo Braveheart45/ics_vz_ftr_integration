@@ -14,17 +14,17 @@ export function JiraInput() {
         placeholder="Project"
         value={jiraInput.project}
         onChange={(e) => setJiraInput({ project: e.target.value })}
-        className="h-9 border-0 bg-transparent text-sm shadow-none focus-visible:ring-0 placeholder:text-muted-foreground/60 rounded-none first:rounded-l-lg"
+        className="h-9 border-0 bg-transparent text-sm shadow-none focus-visible:ring-0 placeholder:text-foreground/50 rounded-none first:rounded-l-lg"
         aria-label="Jira project name"
       />
-      <div className="flex items-center px-1.5 text-muted-foreground/45">
+      <div className="flex items-center px-1.5 text-foreground/40">
         <span className="text-sm font-light">/</span>
       </div>
       <Input
         placeholder="Story number"
         value={jiraInput.storyNumber}
         onChange={(e) => setJiraInput({ storyNumber: e.target.value })}
-        className="h-9 border-0 bg-transparent text-sm shadow-none focus-visible:ring-0 placeholder:text-muted-foreground/60 rounded-none last:rounded-r-lg"
+        className="h-9 border-0 bg-transparent text-sm shadow-none focus-visible:ring-0 placeholder:text-foreground/50 rounded-none last:rounded-r-lg"
         aria-label="Jira story number"
       />
     </div>

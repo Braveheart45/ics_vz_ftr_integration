@@ -170,7 +170,7 @@ export function ChatPanel() {
             {/* Decorative icon */}
             <div className="relative animate-float">
               <div className="flex size-14 items-center justify-center rounded-2xl bg-muted/50 shadow-[0_2px_8px_0_oklch(0_0_0/0.04)] animate-breathe">
-                <Bot className="size-6 text-muted-foreground/50" />
+                <Bot className="size-6 text-foreground/40" />
               </div>
               <div className="absolute -bottom-1 -right-1 flex size-5 items-center justify-center rounded-full border-2 border-background bg-secondary shadow-[0_1px_2px_0_oklch(0_0_0/0.06)]">
                 <SparkleIcon className="size-2.5 text-[#F97316]/80" />
@@ -181,7 +181,7 @@ export function ChatPanel() {
               <h3 className="text-sm font-semibold tracking-[-0.01em] text-foreground">
                 SQLForge Assistant
               </h3>
-              <p className="max-w-[240px] text-xs text-muted-foreground/70 leading-relaxed">
+              <p className="max-w-[260px] text-xs font-medium text-foreground/80 leading-relaxed">
                 Provide requirements above or type a message to begin.
               </p>
             </div>
@@ -222,7 +222,7 @@ export function ChatPanel() {
               onChange={(e) => setFollowUp(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="Follow up or clarify..."
-              className="min-h-[38px] max-h-[100px] resize-none text-sm leading-relaxed placeholder:text-muted-foreground/55 pr-10"
+              className="min-h-[38px] max-h-[100px] resize-none text-sm leading-relaxed placeholder:text-foreground/50 pr-10"
               rows={1}
               aria-label="Follow-up message"
             />

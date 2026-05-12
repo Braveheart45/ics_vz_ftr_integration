@@ -57,28 +57,28 @@ export function PipelineTracker() {
               <div className="flex flex-col items-center gap-1.5 group cursor-default">
                 <div
                   className={cn(
-                    'flex items-center justify-center size-6 rounded-full transition-all duration-300',
+                    'flex items-center justify-center size-7 rounded-full transition-all duration-300',
                     isCompleted
-                      ? 'bg-primary text-primary-foreground shadow-[0_1px_2px_0_oklch(0.55_0.15_264/0.2)] hover:scale-110'
+                      ? 'bg-[#F97316] text-white shadow-[0_1px_3px_0_oklch(0.65_0.2_45/0.3)] hover:scale-110'
                       : isCurrent
-                        ? 'bg-primary text-primary-foreground animate-pulse-ring shadow-[0_1px_3px_0_oklch(0.55_0.15_264/0.25)]'
-                        : 'bg-muted/70 text-muted-foreground/50 group-hover:bg-muted group-hover:text-muted-foreground/70 transition-colors'
+                        ? 'bg-[#4285F4] text-white shadow-[0_1px_3px_0_oklch(0.59_0.19_264/0.3)] animate-pulse-ring'
+                        : 'bg-muted text-foreground/50 group-hover:bg-muted group-hover:text-foreground/70 transition-colors'
                   )}
                 >
                   {isCompleted ? (
-                    <Check className="size-3" strokeWidth={2.5} />
+                    <Check className="size-3.5" strokeWidth={2.5} />
                   ) : (
-                    <Icon className={cn('size-3', isCurrent && 'animate-pulse')} strokeWidth={1.5} />
+                    <Icon className={cn('size-3.5', isCurrent && 'animate-pulse')} strokeWidth={1.75} />
                   )}
                 </div>
                 <span
                   className={cn(
-                    'text-[9px] leading-none font-semibold tracking-[0.01em] whitespace-nowrap hidden md:block transition-colors duration-300',
+                    'text-[10px] leading-none font-bold tracking-[0.01em] whitespace-nowrap hidden md:block transition-colors duration-300',
                     isCompleted
-                      ? 'text-primary/70'
+                      ? 'text-foreground'
                       : isCurrent
-                        ? 'text-primary font-bold'
-                        : 'text-muted-foreground/55 group-hover:text-muted-foreground/70'
+                        ? 'text-foreground font-extrabold'
+                        : 'text-foreground/70 group-hover:text-foreground'
                   )}
                 >
                   {stage.shortLabel}
@@ -90,13 +90,13 @@ export function PipelineTracker() {
                 <div className="flex items-center mx-0.5">
                   <div
                     className={cn(
-                      'h-px transition-all duration-700',
+                      'h-[2px] rounded-full transition-all duration-700',
                       'w-4 sm:w-10 lg:w-14',
                       isCompleted
-                        ? 'bg-primary/30'
+                        ? 'bg-[#F97316]/50'
                         : isCurrent
-                          ? 'bg-gradient-to-r from-primary/30 to-border/50'
-                          : 'bg-border/50'
+                          ? 'animate-connector-pulse bg-[#4285F4]'
+                          : 'bg-border'
                     )}
                   />
                 </div>

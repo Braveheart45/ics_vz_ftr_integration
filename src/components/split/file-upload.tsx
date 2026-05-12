@@ -96,12 +96,12 @@ export function FileUpload() {
           'flex size-7 items-center justify-center rounded-md transition-all duration-200',
           isDragOver ? 'bg-primary/10 scale-110' : 'bg-muted/50 group-hover:scale-105'
         )}>
-          <Upload className="size-3.5 text-muted-foreground/60" />
+          <Upload className="size-3.5 text-foreground/50" />
         </div>
-        <span className="text-xs text-muted-foreground/80">
-          Drop files here or <span className="font-semibold text-foreground/80">browse</span>
+        <span className="text-xs font-medium text-foreground/80">
+          Drop files here or <span className="font-bold text-foreground">browse</span>
         </span>
-        <span className="text-[10px] text-muted-foreground/50 tracking-wide">
+        <span className="text-[10px] font-semibold text-foreground/60 tracking-wide">
           {SUPPORTED_FORMATS.join(' · ')}
         </span>
         <input

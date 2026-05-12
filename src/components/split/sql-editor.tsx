@@ -252,17 +252,17 @@ export function SqlEditor() {
           <div className="flex h-full flex-col items-center justify-center text-center p-8 bg-muted/20">
             <div className="relative animate-float">
               <div className="flex size-16 items-center justify-center rounded-2xl bg-muted/60 shadow-[0_2px_8px_0_oklch(0_0_0/0.03)] animate-breathe">
-                <Terminal className="size-7 text-muted-foreground/40" />
+                <Terminal className="size-7 text-foreground/35" />
               </div>
               {/* Decorative orbiting dots */}
               <div className="absolute -top-1 -left-1 size-2 rounded-full bg-primary/20 animate-ping" />
               <div className="absolute -bottom-2 -right-2 size-1.5 rounded-full bg-[#F97316]/20 animate-ping" style={{ animationDelay: '1s' }} />
             </div>
             <div className="mt-4 animate-fade-in-up flex flex-col gap-1.5" style={{ animationDelay: '200ms' }}>
-              <p className="text-sm font-medium text-foreground/70">
+              <p className="text-sm font-semibold text-foreground">
                 Generated SQL will appear here
               </p>
-              <p className="text-xs text-muted-foreground/55">
+              <p className="text-xs font-medium text-foreground/70">
                 Submit your requirements to get started
               </p>
             </div>

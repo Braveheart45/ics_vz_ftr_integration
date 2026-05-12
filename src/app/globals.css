@@ -207,6 +207,17 @@
   50% { transform: translateY(-3px) scale(1.02); }
 }
 
+@keyframes connector-pulse {
+  0% { opacity: 0.3; }
+  50% { opacity: 1; }
+  100% { opacity: 0.3; }
+}
+
+@keyframes connector-flow {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
 /* Animation utility classes */
 .animate-float {
   animation: float 3.5s ease-in-out infinite;
@@ -248,6 +259,15 @@
 .animate-gradient-shift {
   background-size: 200% 200%;
   animation: gradient-shift 6s ease infinite;
+}
+
+.animate-connector-pulse {
+  animation: connector-pulse 1.5s ease-in-out infinite;
+}
+
+.animate-connector-flow {
+  background-size: 200% 100%;
+  animation: connector-flow 2s linear infinite;
 }
 
 /* Stagger children */
