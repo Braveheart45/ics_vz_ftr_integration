@@ -5,6 +5,7 @@ import type {
   ChatMessage,
   UploadedFile,
   JiraInput,
+  BqProjectInput,
   SqlOutput,
   DetectedTaskInfo,
 } from '@/lib/types';
@@ -23,6 +24,10 @@ interface AppState {
   // ── Jira Input ──────────────────────────────────────────
   jiraInput: JiraInput;
   setJiraInput: (input: Partial<JiraInput>) => void;
+
+  // ── BigQuery Project ─────────────────────────────────────
+  bqProjectInput: BqProjectInput;
+  setBqProjectInput: (input: Partial<BqProjectInput>) => void;
 
   // ── Contextual Input ────────────────────────────────────
   contextText: string;
@@ -73,6 +78,8 @@ const initialState = {
 
   jiraInput: { project: '', storyNumber: '' } as JiraInput,
 
+  bqProjectInput: { projectId: '' } as BqProjectInput,
+
   contextText: '',
   uploadedFiles: [] as UploadedFile[],
 
@@ -110,6 +117,14 @@ export const useAppStore = create<AppState>((set) => ({
   setJiraInput: (input) => {
     set((state) => ({
       jiraInput: { ...state.jiraInput, ...input },
+    }));
+  },
+
+  // ── BigQuery Project ─────────────────────────────────────
+
+  setBqProjectInput: (input) => {
+    set((state) => ({
+      bqProjectInput: { ...state.bqProjectInput, ...input },
     }));
   },
 

@@ -14,6 +14,7 @@ import { cn } from '@/lib/utils';
 // ── Component ─────────────────────────────────────────────────
 export function InputSection() {
   const jiraInput = useAppStore((s) => s.jiraInput);
+  const bqProjectInput = useAppStore((s) => s.bqProjectInput);
   const contextText = useAppStore((s) => s.contextText);
   const uploadedFiles = useAppStore((s) => s.uploadedFiles);
   const addMessage = useAppStore((s) => s.addMessage);
@@ -31,6 +32,12 @@ export function InputSection() {
       );
     }
 
+    if (bqProjectInput.projectId.trim()) {
+      parts.push(
+        `[BigQuery] Project: ${bqProjectInput.projectId}`
+      );
+    }
+
     if (contextText.trim()) {
       parts.push(contextText.trim());
     }
@@ -41,7 +48,7 @@ export function InputSection() {
     }
 
     return parts.length > 0 ? parts.join('\n\n') : null;
-  }, [jiraInput, contextText, uploadedFiles]);
+  }, [jiraInput, bqProjectInput, contextText, uploadedFiles]);
 
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -71,6 +78,7 @@ export function InputSection() {
           sessionId,
           taskType,
           jiraInput: jiraInput.project.trim() ? jiraInput : undefined,
+          bqProjectId: bqProjectInput.projectId.trim() || undefined,
           contextText: contextText.trim() || undefined,
         }),
       });
@@ -93,7 +101,7 @@ export function InputSection() {
     } finally {
       setIsSubmitting(false);
     }
-  }, [buildUserMessage, messages, sessionId, taskType, jiraInput, contextText, addMessage, setStage]);
+  }, [buildUserMessage, messages, sessionId, taskType, jiraInput, bqProjectInput, contextText, addMessage, setStage]);
 
   return (
     <div className="flex flex-col gap-4 animate-fade-in-up" style={{ animationDelay: '100ms' }}>

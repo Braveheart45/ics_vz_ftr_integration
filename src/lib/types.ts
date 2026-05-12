@@ -54,6 +54,11 @@ export interface JiraInput {
   storyNumber: string;
 }
 
+// BigQuery project input
+export interface BqProjectInput {
+  projectId: string;
+}
+
 // SQL output with metadata
 export interface SqlOutput {
   sql: string;
