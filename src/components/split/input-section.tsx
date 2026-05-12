@@ -101,9 +101,6 @@ export function InputSection() {
       <div className="flex flex-col gap-1.5">
         <Label className="text-[11px] font-bold uppercase tracking-[0.06em] text-foreground">
           Jira Story
-          <span className="ml-1.5 text-[10px] font-medium normal-case tracking-normal text-foreground/60">
-            optional
-          </span>
         </Label>
         <JiraInput />
       </div>
