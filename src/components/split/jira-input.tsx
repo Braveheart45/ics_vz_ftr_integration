@@ -80,9 +80,9 @@ export function JiraInput() {
         </div>
       </div>
 
-      {/* Row 2: BigQuery Project — Mandatory */}
-      <div className="flex flex-col gap-1.5">
-        <Label className="text-[10px] font-bold uppercase tracking-[0.06em] text-foreground/70">
+      {/* Row 2: BigQuery Project — Mandatory (label + dropdown inline) */}
+      <div className="flex items-center gap-3">
+        <Label className="text-[10px] font-bold uppercase tracking-[0.06em] text-foreground/70 shrink-0">
           <Database className="inline size-3 mr-1 text-[#4285F4]" />
           BigQuery Project
           <span className="text-red-500 ml-0.5">*</span>
@@ -91,7 +91,7 @@ export function JiraInput() {
           value={bqProjectInput.projectId || '__none__'}
           onValueChange={(v) => setBqProjectInput({ projectId: v === '__none__' ? '' : v })}
         >
-          <SelectTrigger className="h-9 text-sm border-border bg-background shadow-[0_1px_2px_0_oklch(0_0_0/0.03)] focus:ring-primary/20 focus:border-primary/30 transition-all duration-200">
+          <SelectTrigger className="h-9 text-sm flex-1 border-border bg-background shadow-[0_1px_2px_0_oklch(0_0_0/0.03)] focus:ring-primary/20 focus:border-primary/30 transition-all duration-200">
             <SelectValue placeholder="Select BigQuery project *" />
           </SelectTrigger>
           <SelectContent className="max-h-[220px]">
