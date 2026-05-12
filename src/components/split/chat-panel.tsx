@@ -168,16 +168,16 @@ export function ChatPanel() {
         {!hasMessages && (
           <div className="flex h-full flex-col items-center justify-center gap-4 px-6 py-16 text-center">
             {/* Decorative icon */}
-            <div className="relative">
-              <div className="flex size-14 items-center justify-center rounded-2xl bg-muted/50 shadow-[0_2px_8px_0_oklch(0_0_0/0.04)]">
+            <div className="relative animate-float">
+              <div className="flex size-14 items-center justify-center rounded-2xl bg-muted/50 shadow-[0_2px_8px_0_oklch(0_0_0/0.04)] animate-breathe">
                 <Bot className="size-6 text-muted-foreground/50" />
               </div>
               <div className="absolute -bottom-1 -right-1 flex size-5 items-center justify-center rounded-full border-2 border-background bg-secondary shadow-[0_1px_2px_0_oklch(0_0_0/0.06)]">
-                <SparkleIcon className="size-2.5 text-amber-500/80" />
+                <SparkleIcon className="size-2.5 text-[#F97316]/80" />
               </div>
             </div>
 
-            <div className="flex flex-col gap-1.5">
+            <div className="animate-fade-in-up flex flex-col gap-1.5" style={{ animationDelay: '150ms' }}>
               <h3 className="text-sm font-semibold tracking-[-0.01em] text-foreground/80">
                 SQLForge Assistant
               </h3>
@@ -190,20 +190,21 @@ export function ChatPanel() {
 
         {hasMessages && (
           <div className="flex flex-col gap-3.5 py-4">
-            {messages.map((msg) => (
-              <MessageBubble
-                key={msg.id}
-                role={msg.role}
-                content={msg.content}
-                timestamp={msg.timestamp}
-              />
+            {messages.map((msg, i) => (
+              <div key={msg.id} className="animate-fade-in-up" style={{ animationDelay: `${Math.min(i * 50, 300)}ms` }}>
+                <MessageBubble
+                  role={msg.role}
+                  content={msg.content}
+                  timestamp={msg.timestamp}
+                />
+              </div>
             ))}
             {isStreaming && (
               <div className="flex gap-2.5 px-4">
                 <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-secondary text-muted-foreground shadow-[0_1px_2px_0_oklch(0_0_0/0.04)]">
                   <Bot className="size-3.5" />
                 </div>
-                <div className="rounded-2xl rounded-tl-md bg-secondary/80 px-4 py-3 shadow-[0_1px_2px_0_oklch(0_0_0/0.03)]">
+                <div className="rounded-2xl rounded-tl-md bg-secondary/80 px-4 py-3 shadow-[0_1px_2px_0_oklch(0_0_0/0.03)] animate-fade-in">
                   <StreamingDots />
                 </div>
               </div>
@@ -230,7 +231,7 @@ export function ChatPanel() {
             size="icon"
             onClick={sendFollowUp}
             disabled={!followUp.trim() || isSending}
-            className="shrink-0 size-9 rounded-lg shadow-[0_1px_3px_0_oklch(0.55_0.15_264/0.15)]"
+            className="shrink-0 size-9 rounded-lg shadow-[0_1px_3px_0_oklch(0.55_0.15_264/0.15)] transition-all duration-200 hover:scale-110 hover:shadow-[0_2px_6px_0_oklch(0.55_0.15_264/0.25)] active:scale-95"
           >
             {isSending ? (
               <Loader2 className="size-3.5 animate-spin" />

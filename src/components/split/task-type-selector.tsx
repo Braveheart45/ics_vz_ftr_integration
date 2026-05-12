@@ -4,6 +4,7 @@ import { cn } from '@/lib/utils';
 import { useAppStore } from '@/stores/use-app-store';
 import type { TaskType } from '@/lib/types';
 import { Sparkles, Code, ArrowLeftRight } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 
 // ── Segment Definitions ──────────────────────────────────────
 const segments: { value: TaskType; label: string; icon: React.ReactNode }[] = [
@@ -28,22 +29,50 @@ const segments: { value: TaskType; label: string; icon: React.ReactNode }[] = [
 export function TaskTypeSelector() {
   const taskType = useAppStore((s) => s.taskType);
   const setTaskType = useAppStore((s) => s.setTaskType);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [indicatorStyle, setIndicatorStyle] = useState<React.CSSProperties>({});
+
+  const activeIdx = segments.findIndex((seg) => seg.value === taskType);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const buttons = containerRef.current.querySelectorAll<HTMLButtonElement>('[data-segment]');
+    const btn = buttons[activeIdx];
+    if (!btn) return;
+
+    setIndicatorStyle({
+      left: btn.offsetLeft,
+      width: btn.offsetWidth,
+      opacity: 1,
+    });
+  }, [activeIdx]);
 
   return (
-    <div className="flex items-center justify-center px-4 py-2.5">
-      <div className="relative flex items-center rounded-xl bg-muted/70 p-1 shadow-[inset_0_1px_2px_0_oklch(0_0_0/0.04)]">
-        {segments.map((seg) => {
+    <div className="flex items-center justify-center px-4 py-2.5 animate-fade-in-up">
+      <div
+        ref={containerRef}
+        className="relative flex items-center rounded-xl bg-muted/70 p-1 shadow-[inset_0_1px_2px_0_oklch(0_0_0/0.04)]"
+      >
+        {/* Sliding indicator pill */}
+        <div
+          className="absolute top-1 z-0 h-[calc(100%-8px)] rounded-lg bg-primary text-primary-foreground shadow-[0_1px_3px_0_oklch(0.55_0.15_264/0.25)] transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
+          style={indicatorStyle}
+        />
+
+        {segments.map((seg, idx) => {
           const isActive = taskType === seg.value;
           return (
             <button
               key={seg.value}
+              data-segment
               type="button"
               onClick={() => setTaskType(seg.value)}
               className={cn(
-                'relative flex items-center justify-center gap-1.5 rounded-lg px-3.5 py-1.5 text-[11px] font-medium tracking-[-0.01em] transition-all duration-200',
+                'relative z-10 flex items-center justify-center gap-1.5 rounded-lg px-3.5 py-1.5 text-[11px] font-medium tracking-[-0.01em] transition-all duration-200',
                 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1',
+                'hover:scale-[1.02] active:scale-[0.97]',
                 isActive
-                  ? 'bg-primary text-primary-foreground shadow-[0_1px_3px_0_oklch(0.55_0.15_264/0.25)]'
+                  ? 'text-primary-foreground'
                   : 'text-muted-foreground/70 hover:text-muted-foreground'
               )}
               aria-pressed={isActive}

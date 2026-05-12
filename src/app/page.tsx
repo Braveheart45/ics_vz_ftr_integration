@@ -18,10 +18,14 @@ export default function Home() {
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-background">
       {/* ── Header ─────────────────────────────────────────── */}
-      <header className="flex h-12 shrink-0 items-center justify-between border-b border-white/[0.06] bg-[#1B2D4F] px-5 shadow-[0_1px_3px_0_oklch(0_0_0/0.12)]">
+      <header className="relative flex h-12 shrink-0 items-center justify-between border-b border-white/[0.06] px-5 shadow-[0_1px_3px_0_oklch(0_0_0/0.12)] animate-gradient-shift"
+        style={{ background: 'linear-gradient(135deg, #1B2D4F 0%, #1E3A5F 25%, #1B2D4F 50%, #243B5F 75%, #1B2D4F 100%)' }}
+      >
+        {/* Subtle accent line at bottom */}
+        <div className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-[#F97316]/30 to-transparent" />
         {/* Left: Branding */}
         <div className="flex items-center gap-3">
-          <div className="relative flex size-7 items-center justify-center rounded-lg bg-[#F97316] shadow-[0_1px_3px_0_oklch(0.65_0.2_45/0.35)]">
+          <div className="relative flex size-7 items-center justify-center rounded-lg bg-[#F97316] shadow-[0_1px_3px_0_oklch(0.65_0.2_45/0.35)] transition-transform duration-200 hover:scale-110 active:scale-95">
             <Database className="size-3.5 text-white" />
           </div>
           <div className="flex items-baseline gap-2">
@@ -53,10 +57,10 @@ export default function Home() {
             <Button
               variant="ghost"
               size="icon"
-              className="size-8 text-white/50 hover:text-white hover:bg-white/[0.08]"
+              className="size-8 text-white/50 hover:text-white hover:bg-white/[0.08] transition-all duration-200 hover:rotate-180"
               onClick={() => resetSession()}
             >
-              <RotateCcw className="size-3.5" />
+              <RotateCcw className="size-3.5 transition-transform duration-500" />
               <span className="sr-only">New Session</span>
             </Button>
           </TooltipTrigger>
@@ -69,12 +73,12 @@ export default function Home() {
       {/* ── Split Layout ────────────────────────────────────── */}
       <div className="flex min-h-0 flex-1 flex-col md:flex-row">
         {/* Left — SQL Output & Pipeline */}
-        <div className="relative flex min-h-0 flex-1 flex-col border-r border-border/50 md:flex-[58]">
+        <div className="animate-slide-in-left relative flex min-h-0 flex-1 flex-col border-r border-border/50 md:flex-[58]">
           <LeftPanel />
         </div>
 
         {/* Right — Intake & Interaction */}
-        <div className="relative flex min-h-0 flex-1 flex-col md:flex-[42] md:max-w-[520px] lg:max-w-[580px]">
+        <div className="animate-slide-in-right relative flex min-h-0 flex-1 flex-col md:flex-[42] md:max-w-[520px] lg:max-w-[580px]">
           <RightPanel />
         </div>
       </div>

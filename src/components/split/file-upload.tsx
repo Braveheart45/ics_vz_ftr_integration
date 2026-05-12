@@ -72,7 +72,7 @@ export function FileUpload() {
   );
 
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex flex-col gap-2 animate-fade-in-up" style={{ animationDelay: '200ms' }}>
       {/* Drop zone */}
       <div
         role="button"
@@ -86,14 +86,15 @@ export function FileUpload() {
         onDragLeave={handleDragLeave}
         className={cn(
           'flex cursor-pointer flex-col items-center justify-center gap-1.5 rounded-lg border transition-all duration-200',
+          'hover:scale-[1.005]',
           isDragOver
-            ? 'border-primary/30 bg-primary/[0.03] shadow-[0_0_0_1px_oklch(0.55_0.15_264/0.1)]'
-            : 'border-border hover:border-muted-foreground/25 hover:bg-secondary/30'
+            ? 'border-primary/30 bg-primary/[0.03] shadow-[0_0_0_1px_oklch(0.55_0.15_264/0.1)] scale-[1.01]'
+            : 'border-border hover:border-primary/20 hover:bg-primary/[0.015]'
         )}
       >
         <div className={cn(
-          'flex size-7 items-center justify-center rounded-md transition-colors',
-          isDragOver ? 'bg-primary/10' : 'bg-muted/50'
+          'flex size-7 items-center justify-center rounded-md transition-all duration-200',
+          isDragOver ? 'bg-primary/10 scale-110' : 'bg-muted/50 group-hover:scale-105'
         )}>
           <Upload className="size-3.5 text-muted-foreground/60" />
         </div>
@@ -120,7 +121,7 @@ export function FileUpload() {
           {uploadedFiles.map((file) => (
             <div
               key={file.id}
-              className="group flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-xs shadow-[0_1px_2px_0_oklch(0_0_0/0.03)]"
+              className="group flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-xs shadow-[0_1px_2px_0_oklch(0_0_0/0.03)] transition-all duration-200 hover:shadow-[0_2px_4px_0_oklch(0_0_0/0.06)] hover:border-border"
             >
               <FileText className="size-3.5 text-muted-foreground/50" />
               <span className="max-w-[120px] truncate font-medium text-foreground/80">{file.name}</span>

@@ -9,6 +9,7 @@ import { ContextInput } from './context-input';
 import { Sparkles, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Label } from '@/components/ui/label';
+import { cn } from '@/lib/utils';
 
 // ── Component ─────────────────────────────────────────────────
 export function InputSection() {
@@ -95,7 +96,7 @@ export function InputSection() {
   }, [buildUserMessage, messages, sessionId, taskType, jiraInput, contextText, addMessage, setStage]);
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-4 animate-fade-in-up" style={{ animationDelay: '100ms' }}>
       {/* Jira Story (optional) */}
       <div className="flex flex-col gap-1.5">
         <Label className="text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground/70">
@@ -126,9 +127,17 @@ export function InputSection() {
       <Button
         onClick={handleSubmit}
         disabled={isSubmitting}
-        className="w-full h-9.5 font-medium tracking-[-0.01em] shadow-[0_1px_3px_0_oklch(0.55_0.15_264/0.2),inset_0_1px_0_0_oklch(1_0_0/0.1)]"
+        className={cn(
+          'w-full h-9.5 font-medium tracking-[-0.01em] relative overflow-hidden',
+          'shadow-[0_1px_3px_0_oklch(0.55_0.15_264/0.2),inset_0_1px_0_0_oklch(1_0_0/0.1)]',
+          'transition-all duration-200 hover:shadow-[0_2px_8px_0_oklch(0.55_0.15_264/0.3),inset_0_1px_0_0_oklch(1_0_0/0.1)] hover:scale-[1.01] active:scale-[0.99]',
+          'group'
+        )}
         size="default"
       >
+        {/* Shimmer overlay */}
+        <span className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500 animate-shimmer bg-gradient-to-r from-transparent via-white/15 to-transparent" />
+        <span className="relative flex items-center gap-2">
         {isSubmitting ? (
           <>
             <Loader2 className="size-3.5 animate-spin" />
@@ -137,9 +146,10 @@ export function InputSection() {
         ) : (
           <>
             <Sparkles className="size-3.5" />
-            <span>Submit & Analyze</span>
+            <span>Submit &amp; Analyze</span>
           </>
         )}
+        </span>
       </Button>
     </div>
   );

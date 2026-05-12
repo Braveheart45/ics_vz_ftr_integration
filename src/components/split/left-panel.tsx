@@ -12,7 +12,10 @@ export function LeftPanel() {
   const isMaximized = useAppStore((s) => s.isMaximized);
 
   return (
-    <div className="flex h-full flex-col bg-background">
+    <div className="flex h-full flex-col bg-background relative">
+      {/* Subtle top accent line */}
+      <div className="absolute top-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-primary/15 to-transparent z-10" />
+
       {/* SQL Editor — takes remaining space */}
       <div className="flex-1 min-h-0 p-2.5">
         <SqlEditor />

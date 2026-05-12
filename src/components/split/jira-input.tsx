@@ -9,7 +9,7 @@ export function JiraInput() {
   const setJiraInput = useAppStore((s) => s.setJiraInput);
 
   return (
-    <div className="flex items-center gap-0 rounded-lg border border-border bg-background shadow-[0_1px_2px_0_oklch(0_0_0/0.03)] focus-within:border-ring/40 focus-within:shadow-[0_1px_3px_0_oklch(0.55_0.15_264/0.08)] transition-all">
+    <div className="flex items-center gap-0 rounded-lg border border-border bg-background shadow-[0_1px_2px_0_oklch(0_0_0/0.03)] focus-within:border-primary/30 focus-within:shadow-[0_1px_3px_0_oklch(0.55_0.15_264/0.08)] hover:border-border transition-all duration-200">
       <Input
         placeholder="Project"
         value={jiraInput.project}
