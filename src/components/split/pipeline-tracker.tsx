@@ -44,7 +44,7 @@ export function PipelineTracker() {
   const currentIdx = STAGE_ORDER.indexOf(currentStage);
 
   return (
-    <div className="flex h-full items-center gap-1 px-4">
+    <div className="flex h-full items-center gap-1 px-5">
       <div className="flex items-center flex-1 min-w-0">
         {STAGES.map((stage, idx) => {
           const isCompleted = idx < currentIdx;
@@ -54,31 +54,31 @@ export function PipelineTracker() {
           return (
             <div key={stage.id} className="flex items-center">
               {/* Stage indicator */}
-              <div className="flex flex-col items-center gap-1">
+              <div className="flex flex-col items-center gap-1.5">
                 <div
                   className={cn(
                     'flex items-center justify-center size-6 rounded-full transition-all duration-300',
                     isCompleted
-                      ? 'bg-foreground text-background'
+                      ? 'bg-primary text-primary-foreground shadow-[0_1px_2px_0_oklch(0.22_0.012_60/0.2)]'
                       : isCurrent
-                        ? 'bg-foreground text-background ring-2 ring-foreground/20'
-                        : 'bg-muted text-muted-foreground/40'
+                        ? 'bg-primary text-primary-foreground shadow-[0_1px_3px_0_oklch(0.22_0.012_60/0.25),0_0_0_3px_oklch(0.22_0.012_60/0.12)]'
+                        : 'bg-muted/70 text-muted-foreground/35'
                   )}
                 >
                   {isCompleted ? (
-                    <Check className="size-3" strokeWidth={3} />
+                    <Check className="size-3" strokeWidth={2.5} />
                   ) : (
                     <Icon className="size-3" strokeWidth={1.5} />
                   )}
                 </div>
                 <span
                   className={cn(
-                    'text-[9px] leading-none font-medium whitespace-nowrap hidden md:block',
+                    'text-[9px] leading-none font-semibold tracking-[0.01em] whitespace-nowrap hidden md:block transition-colors duration-300',
                     isCompleted
-                      ? 'text-foreground/70'
+                      ? 'text-primary/60'
                       : isCurrent
-                        ? 'text-foreground'
-                        : 'text-muted-foreground/40'
+                        ? 'text-primary'
+                        : 'text-muted-foreground/35'
                   )}
                 >
                   {stage.shortLabel}
@@ -90,10 +90,11 @@ export function PipelineTracker() {
                 <div className="flex items-center mx-0.5">
                   <div
                     className={cn(
-                      'w-4 sm:w-8 lg:w-12 h-px transition-colors duration-300',
+                      'h-px transition-colors duration-500',
+                      'w-4 sm:w-10 lg:w-14',
                       isCompleted
-                        ? 'bg-foreground/30'
-                        : 'bg-border'
+                        ? 'bg-primary/20'
+                        : 'bg-border/50'
                     )}
                   />
                 </div>

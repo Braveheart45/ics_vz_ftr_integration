@@ -13,9 +13,9 @@ import { formatDistanceToNow } from 'date-fns';
 function StreamingDots() {
   return (
     <span className="inline-flex items-center gap-1">
-      <span className="size-1 animate-bounce rounded-full bg-muted-foreground/50 [animation-delay:0ms]" />
-      <span className="size-1 animate-bounce rounded-full bg-muted-foreground/50 [animation-delay:150ms]" />
-      <span className="size-1 animate-bounce rounded-full bg-muted-foreground/50 [animation-delay:300ms]" />
+      <span className="size-1.5 animate-bounce rounded-full bg-primary/40 [animation-delay:0ms]" />
+      <span className="size-1.5 animate-bounce rounded-full bg-primary/40 [animation-delay:150ms]" />
+      <span className="size-1.5 animate-bounce rounded-full bg-primary/40 [animation-delay:300ms]" />
     </span>
   );
 }
@@ -35,8 +35,8 @@ function MessageBubble({
 
   if (isSystem) {
     return (
-      <div className="flex justify-center px-4 py-1">
-        <span className="text-[11px] text-muted-foreground/50">{content}</span>
+      <div className="flex justify-center px-4 py-1.5">
+        <span className="text-[11px] text-muted-foreground/50 font-medium">{content}</span>
       </div>
     );
   }
@@ -44,40 +44,40 @@ function MessageBubble({
   const timeStr = formatDistanceToNow(new Date(timestamp), { addSuffix: true });
 
   return (
-    <div className={cn('flex gap-2 px-4', isUser ? 'flex-row-reverse' : 'flex-row')}>
+    <div className={cn('flex gap-2.5 px-4', isUser ? 'flex-row-reverse' : 'flex-row')}>
       {/* Avatar */}
       <div
         className={cn(
-          'mt-1 flex size-6 shrink-0 items-center justify-center rounded-full',
+          'mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full',
           isUser
-            ? 'bg-foreground/90 text-background'
-            : 'bg-muted text-muted-foreground'
+            ? 'bg-primary text-primary-foreground shadow-[0_1px_2px_0_oklch(0.22_0.012_60/0.2)]'
+            : 'bg-secondary text-muted-foreground shadow-[0_1px_2px_0_oklch(0_0_0/0.04)]'
         )}
       >
-        {isUser ? <User className="size-3" /> : <Bot className="size-3" />}
+        {isUser ? <User className="size-3.5" /> : <Bot className="size-3.5" />}
       </div>
 
       {/* Bubble */}
-      <div className="flex max-w-[85%] flex-col gap-0.5">
+      <div className="flex max-w-[82%] flex-col gap-0.5">
         <div
           className={cn(
-            'rounded-xl px-3 py-2 text-[13px] leading-relaxed',
+            'rounded-2xl px-3.5 py-2.5 text-[13px] leading-relaxed transition-colors',
             isUser
-              ? 'rounded-tr-sm bg-foreground/90 text-background'
-              : 'rounded-tl-sm bg-muted/80 text-foreground'
+              ? 'rounded-tr-md bg-primary text-primary-foreground shadow-[0_1px_3px_0_oklch(0.22_0.012_60/0.15)]'
+              : 'rounded-tl-md bg-secondary/80 text-foreground shadow-[0_1px_2px_0_oklch(0_0_0/0.03)]'
           )}
         >
           {isUser ? (
             <p className="whitespace-pre-wrap">{content}</p>
           ) : (
-            <div className="prose prose-sm max-w-none prose-p:my-1 prose-pre:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-headings:my-1.5 prose-code:rounded prose-code:bg-muted-foreground/10 prose-code:px-1 prose-a:text-foreground prose-strong:text-foreground">
+            <div className="prose prose-sm max-w-none prose-p:my-1 prose-pre:my-2 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-headings:my-1.5 prose-code:rounded prose-code:bg-muted prose-code:px-1 prose-code:font-normal prose-a:text-primary prose-a:no-underline hover:prose-a:underline prose-strong:font-semibold">
               <ReactMarkdown>{content}</ReactMarkdown>
             </div>
           )}
         </div>
         <span
           className={cn(
-            'px-1 text-[10px] text-muted-foreground/40',
+            'px-1 text-[10px] text-muted-foreground/35 font-medium',
             isUser ? 'text-right' : 'text-left'
           )}
         >
@@ -166,23 +166,30 @@ export function ChatPanel() {
         className="flex-1 overflow-y-auto custom-scrollbar"
       >
         {!hasMessages && (
-          <div className="flex h-full flex-col items-center justify-center gap-3 px-6 py-12 text-center">
-            <div className="flex size-10 items-center justify-center rounded-full bg-muted/60">
-              <Bot className="size-5 text-muted-foreground/60" />
+          <div className="flex h-full flex-col items-center justify-center gap-4 px-6 py-16 text-center">
+            {/* Decorative icon */}
+            <div className="relative">
+              <div className="flex size-14 items-center justify-center rounded-2xl bg-muted/50 shadow-[0_2px_8px_0_oklch(0_0_0/0.04)]">
+                <Bot className="size-6 text-muted-foreground/50" />
+              </div>
+              <div className="absolute -bottom-1 -right-1 flex size-5 items-center justify-center rounded-full border-2 border-background bg-secondary shadow-[0_1px_2px_0_oklch(0_0_0/0.06)]">
+                <SparkleIcon className="size-2.5 text-amber-500/80" />
+              </div>
             </div>
-            <div className="flex flex-col gap-1">
-              <h3 className="text-sm font-medium text-foreground/80">
+
+            <div className="flex flex-col gap-1.5">
+              <h3 className="text-sm font-semibold tracking-[-0.01em] text-foreground/80">
                 SQLForge Assistant
               </h3>
-              <p className="max-w-[240px] text-xs text-muted-foreground/60 leading-relaxed">
-                Provide your requirements above, or type a message below to get started.
+              <p className="max-w-[220px] text-xs text-muted-foreground/55 leading-relaxed">
+                Provide requirements above or type a message to begin.
               </p>
             </div>
           </div>
         )}
 
         {hasMessages && (
-          <div className="flex flex-col gap-3 py-4">
+          <div className="flex flex-col gap-3.5 py-4">
             {messages.map((msg) => (
               <MessageBubble
                 key={msg.id}
@@ -192,11 +199,11 @@ export function ChatPanel() {
               />
             ))}
             {isStreaming && (
-              <div className="flex gap-2 px-4">
-                <div className="mt-1 flex size-6 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
-                  <Bot className="size-3" />
+              <div className="flex gap-2.5 px-4">
+                <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-secondary text-muted-foreground shadow-[0_1px_2px_0_oklch(0_0_0/0.04)]">
+                  <Bot className="size-3.5" />
                 </div>
-                <div className="rounded-xl rounded-tl-sm bg-muted/80 px-4 py-3">
+                <div className="rounded-2xl rounded-tl-md bg-secondary/80 px-4 py-3 shadow-[0_1px_2px_0_oklch(0_0_0/0.03)]">
                   <StreamingDots />
                 </div>
               </div>
@@ -206,22 +213,24 @@ export function ChatPanel() {
       </div>
 
       {/* Input bar */}
-      <div className="border-t px-3 py-2.5">
+      <div className="border-t border-border/40 bg-background/60 px-3 py-2.5 backdrop-blur-sm supports-[backdrop-filter]:bg-background/40">
         <div className="flex items-end gap-2">
-          <Textarea
-            value={followUp}
-            onChange={(e) => setFollowUp(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Follow up or clarify..."
-            className="min-h-[36px] max-h-[100px] resize-none text-sm placeholder:text-muted-foreground/40"
-            rows={1}
-            aria-label="Follow-up message"
-          />
+          <div className="relative flex-1">
+            <Textarea
+              value={followUp}
+              onChange={(e) => setFollowUp(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Follow up or clarify..."
+              className="min-h-[38px] max-h-[100px] resize-none text-sm leading-relaxed placeholder:text-muted-foreground/40 pr-10"
+              rows={1}
+              aria-label="Follow-up message"
+            />
+          </div>
           <Button
             size="icon"
             onClick={sendFollowUp}
             disabled={!followUp.trim() || isSending}
-            className="shrink-0 size-9"
+            className="shrink-0 size-9 rounded-lg shadow-[0_1px_3px_0_oklch(0.22_0.012_60/0.15)]"
           >
             {isSending ? (
               <Loader2 className="size-3.5 animate-spin" />
@@ -232,5 +241,19 @@ export function ChatPanel() {
         </div>
       </div>
     </div>
+  );
+}
+
+// ── Sparkle icon (inline SVG for minimal dependency) ──────────
+function SparkleIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 16 16"
+      fill="currentColor"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <path d="M8 0L9.41 6.59L16 8L9.41 9.41L8 16L6.59 9.41L0 8L6.59 6.59L8 0Z" />
+    </svg>
   );
 }

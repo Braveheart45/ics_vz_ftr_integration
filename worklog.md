@@ -245,3 +245,31 @@ Stage Summary:
 - Minimal monochrome aesthetic throughout — no excessive color usage
 - All 10 split-screen components rewritten for consistency
 - Lint passes clean, dev server compiles successfully
+---
+Task ID: 11
+Agent: Main Agent
+Task: Aesthetic polish — warm minimalist palette with depth
+
+Work Log:
+- Shifted entire CSS variable palette from cool gray to warm gray (oklch hue ~75 for all neutrals)
+- Added warm undertones to: background, foreground, muted, border, secondary, card surfaces
+- Redesigned header: frosted glass with backdrop-blur, warm shadow on logo, pill-shaped session badge with amber pulse
+- Task type selector: warm primary active state with shadow, inset shadow on track
+- Input section: uppercase tracking labels, gradient dividers, submit button with warm shadow + inner highlight
+- Jira input: compound input with shared border, focus-within ring animation
+- File upload: warm hover/drag states, icon container, browse link styling
+- Context input: focus ring, subtle shadow
+- Chat panel: shadow on bubbles (user: warm shadow, assistant: subtle lift), larger avatars, enriched empty state with sparkle icon, frosted input bar
+- SQL editor: rounded-xl container with layered shadow, toolbar with bg-muted/40, file tab with border+shadow, amber Modified badge, richer empty state
+- Pipeline tracker: warm shadow on completed/current stages, outer glow ring on current, warm connector colors
+- Left/right panels: subtle background differentiation (secondary/20 tint on right)
+- All interactive elements: refined hover transitions (bg-secondary/80, text-foreground/80)
+- Scrollbar: warm gray tint
+
+Stage Summary:
+- Warm Minimalist palette (Linear/Raycast inspired) — single warm tone, no additional colors
+- Depth through: layered shadows (shadow-sm, shadow-md), inner highlights, outer glow rings
+- Frosted glass effects on header and chat input bar
+- Visual hierarchy through: font-weight variations, tracking, opacity layers
+- Refined interactive states with smooth 200ms transitions
+- Lint passes clean, dev server compiles successfully

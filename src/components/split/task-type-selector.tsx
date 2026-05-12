@@ -30,8 +30,8 @@ export function TaskTypeSelector() {
   const setTaskType = useAppStore((s) => s.setTaskType);
 
   return (
-    <div className="flex items-center justify-center px-3 py-2">
-      <div className="flex items-center rounded-lg bg-muted/60 p-0.5">
+    <div className="flex items-center justify-center px-4 py-2.5">
+      <div className="relative flex items-center rounded-xl bg-muted/70 p-1 shadow-[inset_0_1px_2px_0_oklch(0_0_0/0.04)]">
         {segments.map((seg) => {
           const isActive = taskType === seg.value;
           return (
@@ -40,11 +40,11 @@ export function TaskTypeSelector() {
               type="button"
               onClick={() => setTaskType(seg.value)}
               className={cn(
-                'relative flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all duration-200',
-                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                'relative flex items-center justify-center gap-1.5 rounded-lg px-3.5 py-1.5 text-[11px] font-medium tracking-[-0.01em] transition-all duration-200',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1',
                 isActive
-                  ? 'bg-background text-foreground shadow-sm'
-                  : 'text-muted-foreground/60 hover:text-muted-foreground'
+                  ? 'bg-primary text-primary-foreground shadow-[0_1px_3px_0_oklch(0.22_0.012_60/0.25)]'
+                  : 'text-muted-foreground/70 hover:text-muted-foreground'
               )}
               aria-pressed={isActive}
               title={seg.label}

@@ -85,17 +85,22 @@ export function FileUpload() {
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         className={cn(
-          'flex cursor-pointer items-center justify-center gap-2 rounded-lg border border-dashed px-3 py-2.5 transition-colors',
+          'flex cursor-pointer flex-col items-center justify-center gap-1.5 rounded-lg border transition-all duration-200',
           isDragOver
-            ? 'border-foreground/20 bg-foreground/[0.02]'
-            : 'border-muted-foreground/20 hover:border-muted-foreground/35'
+            ? 'border-primary/30 bg-primary/[0.03] shadow-[0_0_0_1px_oklch(0.22_0.012_60/0.1)]'
+            : 'border-border hover:border-muted-foreground/25 hover:bg-secondary/30'
         )}
       >
-        <Upload className="size-4 text-muted-foreground/50" />
-        <span className="text-xs text-muted-foreground/60">
-          Attach files
+        <div className={cn(
+          'flex size-7 items-center justify-center rounded-md transition-colors',
+          isDragOver ? 'bg-primary/10' : 'bg-muted/50'
+        )}>
+          <Upload className="size-3.5 text-muted-foreground/60" />
+        </div>
+        <span className="text-xs text-muted-foreground/70">
+          Drop files here or <span className="font-medium text-foreground/70">browse</span>
         </span>
-        <span className="text-[10px] text-muted-foreground/30">
+        <span className="text-[10px] text-muted-foreground/35 tracking-wide">
           {SUPPORTED_FORMATS.join(' · ')}
         </span>
         <input
@@ -115,10 +120,10 @@ export function FileUpload() {
           {uploadedFiles.map((file) => (
             <div
               key={file.id}
-              className="group flex items-center gap-1.5 rounded-md border border-muted-foreground/15 bg-muted/40 px-2 py-1 text-xs"
+              className="group flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-xs shadow-[0_1px_2px_0_oklch(0_0_0/0.03)]"
             >
-              <FileText className="size-3.5 text-muted-foreground/60" />
-              <span className="max-w-[120px] truncate text-foreground/80">{file.name}</span>
+              <FileText className="size-3.5 text-muted-foreground/50" />
+              <span className="max-w-[120px] truncate font-medium text-foreground/80">{file.name}</span>
               <span className="text-muted-foreground/40">{formatFileSize(file.size)}</span>
               <button
                 type="button"
@@ -126,7 +131,7 @@ export function FileUpload() {
                   e.stopPropagation();
                   removeFile(file.id);
                 }}
-                className="ml-0.5 rounded-full p-0.5 text-muted-foreground/40 opacity-0 transition-opacity hover:text-foreground/70 group-hover:opacity-100"
+                className="ml-0.5 rounded-full p-0.5 text-muted-foreground/30 opacity-0 transition-all hover:text-foreground/60 group-hover:opacity-100"
                 aria-label={`Remove ${file.name}`}
               >
                 <X className="size-3" />

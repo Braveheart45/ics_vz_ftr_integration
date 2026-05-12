@@ -98,17 +98,22 @@ export function InputSection() {
     <div className="flex flex-col gap-4">
       {/* Jira Story (optional) */}
       <div className="flex flex-col gap-1.5">
-        <Label className="text-xs font-medium text-muted-foreground">
-          Jira Story <span className="text-muted-foreground/40 font-normal">(optional)</span>
+        <Label className="text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground/70">
+          Jira Story
+          <span className="ml-1.5 text-[10px] font-normal normal-case tracking-normal text-muted-foreground/40">
+            optional
+          </span>
         </Label>
         <JiraInput />
       </div>
 
       {/* Divider */}
-      <div className="flex items-center gap-2">
-        <div className="flex-1 h-px bg-border" />
-        <span className="text-[10px] text-muted-foreground/40 uppercase tracking-wider">and / or</span>
-        <div className="flex-1 h-px bg-border" />
+      <div className="flex items-center gap-3">
+        <div className="h-px flex-1 bg-gradient-to-r from-transparent via-border to-transparent" />
+        <span className="text-[10px] font-medium text-muted-foreground/40 uppercase tracking-[0.1em]">
+          or
+        </span>
+        <div className="h-px flex-1 bg-gradient-to-r from-transparent via-border to-transparent" />
       </div>
 
       {/* File Upload */}
@@ -121,18 +126,18 @@ export function InputSection() {
       <Button
         onClick={handleSubmit}
         disabled={isSubmitting}
-        className="w-full h-9"
+        className="w-full h-9.5 font-medium tracking-[-0.01em] shadow-[0_1px_3px_0_oklch(0.22_0.012_60/0.2),inset_0_1px_0_0_oklch(1_0_0/0.1)]"
         size="default"
       >
         {isSubmitting ? (
           <>
             <Loader2 className="size-3.5 animate-spin" />
-            Analyzing...
+            <span>Analyzing...</span>
           </>
         ) : (
           <>
             <Sparkles className="size-3.5" />
-            Submit & Analyze
+            <span>Submit & Analyze</span>
           </>
         )}
       </Button>

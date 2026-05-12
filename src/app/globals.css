@@ -43,74 +43,100 @@
   --radius-xl: calc(var(--radius) + 4px);
 }
 
+/* ================================================================
+   Warm Minimalist Palette — SQLForge
+   Inspired by Linear / Raycast / Arc Browser
+   Single accent: muted warm copper on warm neutral base
+   ================================================================ */
+
 :root {
   --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
+
+  /* Base — pure white with warmth */
+  --background: oklch(0.995 0.002 75);
+  --foreground: oklch(0.15 0.01 50);
+
+  /* Surfaces — very subtle warm tint */
+  --card: oklch(0.998 0.001 75);
+  --card-foreground: oklch(0.15 0.01 50);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.15 0.01 50);
+
+  /* Primary — warm black (stone-900 territory) */
+  --primary: oklch(0.22 0.012 60);
+  --primary-foreground: oklch(0.985 0.001 75);
+
+  /* Secondary / Muted — warm grays */
+  --secondary: oklch(0.965 0.004 75);
+  --secondary-foreground: oklch(0.22 0.01 60);
+  --muted: oklch(0.96 0.005 75);
+  --muted-foreground: oklch(0.50 0.01 50);
+  --accent: oklch(0.955 0.006 75);
+  --accent-foreground: oklch(0.22 0.01 60);
+
+  /* Borders & Inputs — warm */
+  --border: oklch(0.90 0.006 75);
+  --input: oklch(0.90 0.006 75);
+  --ring: oklch(0.65 0.02 75);
+
+  /* Destructive — kept functional */
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+
+  /* Charts — warm-toned */
+  --chart-1: oklch(0.60 0.10 60);
+  --chart-2: oklch(0.55 0.08 50);
+  --chart-3: oklch(0.50 0.06 40);
+  --chart-4: oklch(0.70 0.08 80);
+  --chart-5: oklch(0.65 0.06 90);
+
+  /* Sidebar */
+  --sidebar: oklch(0.98 0.003 75);
+  --sidebar-foreground: oklch(0.15 0.01 50);
+  --sidebar-primary: oklch(0.22 0.012 60);
+  --sidebar-primary-foreground: oklch(0.985 0.001 75);
+  --sidebar-accent: oklch(0.955 0.006 75);
+  --sidebar-accent-foreground: oklch(0.22 0.01 60);
+  --sidebar-border: oklch(0.91 0.005 75);
+  --sidebar-ring: oklch(0.65 0.02 75);
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
+  --background: oklch(0.14 0.005 60);
+  --foreground: oklch(0.95 0.005 75);
+  --card: oklch(0.18 0.005 60);
+  --card-foreground: oklch(0.95 0.005 75);
+  --popover: oklch(0.18 0.005 60);
+  --popover-foreground: oklch(0.95 0.005 75);
+  --primary: oklch(0.92 0.005 75);
+  --primary-foreground: oklch(0.18 0.01 60);
+  --secondary: oklch(0.24 0.005 60);
+  --secondary-foreground: oklch(0.95 0.005 75);
+  --muted: oklch(0.24 0.005 60);
+  --muted-foreground: oklch(0.65 0.01 50);
+  --accent: oklch(0.24 0.005 60);
+  --accent-foreground: oklch(0.95 0.005 75);
   --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --border: oklch(1 0 0 / 8%);
+  --input: oklch(1 0 0 / 12%);
+  --ring: oklch(0.50 0.01 50);
+  --chart-1: oklch(0.65 0.12 75);
+  --chart-2: oklch(0.60 0.10 65);
+  --chart-3: oklch(0.55 0.08 55);
+  --chart-4: oklch(0.70 0.08 85);
+  --chart-5: oklch(0.65 0.06 95);
+  --sidebar: oklch(0.16 0.005 60);
+  --sidebar-foreground: oklch(0.95 0.005 75);
+  --sidebar-primary: oklch(0.92 0.005 75);
+  --sidebar-primary-foreground: oklch(0.18 0.01 60);
+  --sidebar-accent: oklch(0.24 0.005 60);
+  --sidebar-accent-foreground: oklch(0.95 0.005 75);
+  --sidebar-border: oklch(1 0 0 / 8%);
+  --sidebar-ring: oklch(0.50 0.01 50);
 }
+
+/* ================================================================
+   Base Layer
+   ================================================================ */
 
 @layer base {
   * {
@@ -121,10 +147,13 @@
   }
 }
 
-/* ── Custom Scrollbar ────────────────────────────────── */
+/* ================================================================
+   Custom Scrollbar — warm tint
+   ================================================================ */
+
 .custom-scrollbar::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
 }
 
 .custom-scrollbar::-webkit-scrollbar-track {
@@ -132,35 +161,23 @@
 }
 
 .custom-scrollbar::-webkit-scrollbar-thumb {
-  background: oklch(0.8 0 0 / 40%);
+  background: oklch(0.78 0.01 60);
   border-radius: 9999px;
 }
 
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: oklch(0.7 0 0 / 60%);
+  background: oklch(0.68 0.015 60);
 }
 
 .custom-scrollbar {
   scrollbar-width: thin;
-  scrollbar-color: oklch(0.8 0 0 / 40%) transparent;
+  scrollbar-color: oklch(0.78 0.01 60) transparent;
 }
 
-/* ── Hero Gradient Animation ─────────────────────────── */
-@keyframes hero-gradient-shift {
-  0%, 100% {
-    background-position: 0% 50%;
-  }
-  50% {
-    background-position: 100% 50%;
-  }
-}
+/* ================================================================
+   SQL Code Block Styling
+   ================================================================ */
 
-.hero-gradient {
-  background-size: 200% 200%;
-  animation: hero-gradient-shift 8s ease infinite;
-}
-
-/* ── SQL Code Block Styling ──────────────────────────── */
 .sql-code-block {
   font-family: var(--font-geist-mono), ui-monospace, SFMono-Regular, "SF Mono",
     Menlo, Consolas, "Liberation Mono", monospace;
@@ -168,38 +185,38 @@
   line-height: 1.6;
   tab-size: 2;
   -moz-tab-size: 2;
-  background-color: oklch(0.97 0 0);
-  border: 1px solid oklch(0.922 0 0);
+  background-color: oklch(0.97 0.003 75);
+  border: 1px solid oklch(0.91 0.005 75);
   border-radius: var(--radius);
   overflow-x: auto;
 }
 
 .sql-code-block code {
-  color: oklch(0.205 0 0);
+  color: oklch(0.18 0.01 60);
 }
 
 .sql-code-block .sql-keyword {
-  color: oklch(0.5 0.2 300);
+  color: oklch(0.45 0.04 55);
   font-weight: 600;
 }
 
 .sql-code-block .sql-function {
-  color: oklch(0.55 0.2 180);
+  color: oklch(0.42 0.06 70);
 }
 
 .sql-code-block .sql-string {
-  color: oklch(0.5 0.15 145);
+  color: oklch(0.45 0.07 55);
 }
 
 .sql-code-block .sql-comment {
-  color: oklch(0.65 0 0);
+  color: oklch(0.60 0.01 60);
   font-style: italic;
 }
 
 .sql-code-block .sql-number {
-  color: oklch(0.55 0.2 25);
+  color: oklch(0.48 0.06 45);
 }
 
 .sql-code-block .sql-operator {
-  color: oklch(0.4 0 0);
+  color: oklch(0.35 0.01 60);
 }

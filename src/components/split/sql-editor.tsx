@@ -12,6 +12,7 @@ import {
   Rocket,
   Code,
   FileCode2,
+  Terminal,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -146,8 +147,9 @@ export function SqlEditor() {
         disabled={disabled}
         title={title}
         className={cn(
-          'h-7 w-7 p-0 text-muted-foreground/70 hover:text-foreground',
-          active && 'text-foreground'
+          'h-7 w-7 rounded-md text-muted-foreground/55 transition-colors',
+          'hover:bg-secondary/80 hover:text-foreground/80',
+          active && 'bg-secondary text-foreground/90'
         )}
       >
         {children}
@@ -160,19 +162,19 @@ export function SqlEditor() {
   // ============================================================
 
   const editorContent = (
-    <div className="flex h-full flex-col overflow-hidden rounded-lg border">
+    <div className="flex h-full flex-col overflow-hidden rounded-xl border border-border/60 bg-background shadow-[0_2px_8px_0_oklch(0_0_0/0.04),0_1px_2px_0_oklch(0_0_0/0.03)]">
       {/* ── Toolbar ──────────────────────────────────────── */}
-      <div className="flex items-center justify-between border-b bg-muted/30 px-2.5 py-1.5 shrink-0">
+      <div className="flex items-center justify-between border-b border-border/40 bg-muted/40 px-3 py-1.5 shrink-0">
         {/* Left: File tab */}
         <div className="flex items-center gap-2 min-w-0">
-          <div className="flex items-center gap-1.5 rounded-md bg-background px-2 py-0.5 text-xs font-medium text-foreground/80 border">
-            <FileCode2 className="size-3 text-muted-foreground/60" />
+          <div className="flex items-center gap-1.5 rounded-md bg-background px-2.5 py-1 text-xs font-medium text-foreground/70 border border-border/50 shadow-[0_1px_2px_0_oklch(0_0_0/0.03)]">
+            <FileCode2 className="size-3 text-muted-foreground/50" />
             <span className="truncate max-w-[160px]">{sqlOutput?.fileName || 'output.sql'}</span>
           </div>
           {sqlOutput?.isEdited && (
             <Badge
               variant="outline"
-              className="text-[10px] px-1.5 py-0 text-muted-foreground/70 border-muted-foreground/20"
+              className="text-[10px] px-1.5 py-0 font-medium text-amber-600/80 border-amber-300/40 bg-amber-50/50"
             >
               Modified
             </Badge>
@@ -182,7 +184,7 @@ export function SqlEditor() {
         {/* Right: Actions */}
         <div className="flex items-center gap-0.5 shrink-0">
           <ToolBtn onClick={handleCopy} disabled={!sqlOutput} title="Copy">
-            {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+            {copied ? <Check className="size-3.5 text-emerald-600" /> : <Copy className="size-3.5" />}
           </ToolBtn>
           <ToolBtn onClick={handleDownload} disabled={!sqlOutput} title="Download">
             <Download className="size-3.5" />
@@ -194,7 +196,7 @@ export function SqlEditor() {
             {isMaximized ? <Minimize2 className="size-3.5" /> : <Maximize2 className="size-3.5" />}
           </ToolBtn>
 
-          <div className="mx-1 h-4 w-px bg-border" />
+          <div className="mx-1 h-3.5 w-px bg-border/50" />
 
           <ToolBtn onClick={handleRegenerate} disabled={!sqlOutput || isRegenerating} title="Regenerate">
             <RefreshCw className={cn('size-3.5', isRegenerating && 'animate-spin')} />
@@ -246,13 +248,20 @@ export function SqlEditor() {
           )
         ) : (
           /* ── Empty State ───────────────────────────────── */
-          <div className="flex h-full flex-col items-center justify-center text-center p-8">
-            <div className="flex size-10 items-center justify-center rounded-full bg-muted/50">
-              <Code className="size-5 text-muted-foreground/50" />
+          <div className="flex h-full flex-col items-center justify-center text-center p-8 bg-muted/20">
+            <div className="relative">
+              <div className="flex size-16 items-center justify-center rounded-2xl bg-muted/60 shadow-[0_2px_8px_0_oklch(0_0_0/0.03)]">
+                <Terminal className="size-7 text-muted-foreground/40" />
+              </div>
             </div>
-            <p className="mt-3 text-sm text-muted-foreground/60">
-              Generated SQL will appear here
-            </p>
+            <div className="mt-4 flex flex-col gap-1.5">
+              <p className="text-sm font-medium text-foreground/60">
+                Generated SQL will appear here
+              </p>
+              <p className="text-xs text-muted-foreground/40">
+                Submit your requirements to get started
+              </p>
+            </div>
           </div>
         )}
       </div>
@@ -264,10 +273,10 @@ export function SqlEditor() {
     return (
       <>
         <div
-          className="fixed inset-0 bg-black/40 backdrop-blur-[2px] z-40"
+          className="fixed inset-0 bg-black/50 backdrop-blur-sm z-40"
           onClick={toggleMaximize}
         />
-        <div className="fixed inset-4 z-50">{editorContent}</div>
+        <div className="fixed inset-4 z-50 rounded-xl overflow-hidden shadow-2xl">{editorContent}</div>
       </>
     );
   }
