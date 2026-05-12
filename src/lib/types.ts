@@ -1,162 +1,81 @@
 // ============================================================
-// AI-Powered SQL Generation & SQL Conversion Agent
-// Enterprise UI — Type Definitions
+// AI-Powered SQL Generation & Legacy SQL Conversion Agent
+// Split-Screen Enterprise UI — Type Definitions
 // ============================================================
 
-// Input modes
-export type InputMode = 'jira' | 'stm' | 'legacy_sql';
+// Task types
+export type TaskType = 'auto_detect' | 'sql_generation' | 'legacy_sql_conversion';
 
-// Workflow stages
+// Input modes for the right panel
+export type InputMode = 'jira' | 'contextual';
+
+// Workflow pipeline stages
 export type WorkflowStage =
+  | 'idle'
   | 'intake'
-  | 'requirement_analysis'
-  | 'object_resolution'
-  | 'schema_verification'
-  | 'design_decisions'
-  | 'sql_construction'
+  | 'analysis'
+  | 'schema_resolution'
+  | 'sql_generation'
   | 'validation'
-  | 'delivery';
+  | 'ready';
 
-// Job status derived from stage
-export type JobStatus = 'in_progress' | 'needs_review' | 'needs_approval' | 'completed' | 'failed' | 'blocked';
+// Chat message roles
+export type MessageRole = 'user' | 'assistant' | 'system';
 
-// Input source info
-export interface InputSource {
-  type: InputMode;
-  reference: string; // Jira ticket ID, file name, or SQL identifier
-  summary: string;
-  attachments?: string[];
+// Chat message
+export interface ChatMessage {
+  id: string;
+  role: MessageRole;
+  content: string;
+  timestamp: string;
+  isStreaming?: boolean;
+  clarifications?: ClarificationPrompt[];
+}
+
+// Clarification prompt (when agent needs more info)
+export interface ClarificationPrompt {
+  id: string;
+  question: string;
+  options?: { label: string; value: string }[];
+  fieldType: 'select' | 'text' | 'multiselect';
+  placeholder?: string;
+  required: boolean;
+}
+
+// Uploaded file info
+export interface UploadedFile {
+  id: string;
+  name: string;
+  size: number;
+  type: string;
   uploadedAt: string;
 }
 
-// Requirement extracted from input
-export interface ExtractedRequirement {
-  id: string;
+// Jira input data
+export interface JiraInput {
+  project: string;
+  storyNumber: string;
+}
+
+// Pipeline stage definition
+export interface PipelineStageDef {
+  id: WorkflowStage;
+  label: string;
   description: string;
-  sourceTable?: string;
-  targetTable?: string;
-  transformation: string;
-  complexity: 'low' | 'medium' | 'high';
-  status: 'confirmed' | 'ambiguous' | 'pending_review';
-  ambiguityNotes?: string;
+  icon: string;
 }
 
-// Schema object
-export interface SchemaObject {
-  name: string;
-  type: 'table' | 'view' | 'staging_table';
-  database: string;
-  schema: string;
-  columnCount: number;
-  status: 'verified' | 'unverified' | 'not_found';
-  lastVerified?: string;
-}
-
-// Design decision
-export interface DesignDecision {
-  id: string;
-  title: string;
-  description: string;
-  options: { label: string; description: string; recommended: boolean }[];
-  selectedOption?: string;
-  status: 'pending' | 'approved' | 'rejected';
-  decidedBy?: string;
-  decidedAt?: string;
-}
-
-// Validation
-export interface ValidationError {
-  code: string;
-  message: string;
-  severity: 'error' | 'critical';
-  lineNumber?: number;
-  column?: string;
-  suggestion?: string;
-}
-
-export interface ValidationWarning {
-  code: string;
-  message: string;
-  severity: 'warning' | 'info';
-  suggestion?: string;
-}
-
-export interface DQFinding {
-  id: string;
-  type: 'data_quality' | 'schema_drift' | 'logic_gap';
-  severity: 'high' | 'medium' | 'low';
-  description: string;
-  affectedObject: string;
-  recommendation: string;
-}
-
-// SQL artifact
-export interface SqlArtifact {
-  id: string;
-  name: string;
+// SQL output with metadata
+export interface SqlOutput {
   sql: string;
-  type: 'ddl' | 'dml' | 'staging' | 'production';
-  targetPlatform: 'bigquery';
-  status: 'draft' | 'review' | 'approved' | 'rejected';
-  dryRunResult?: {
-    success: boolean;
-    bytesProcessed?: number;
-    slotsUsed?: number;
-    errors?: string[];
-    warnings?: string[];
-  };
-  validationResult?: {
-    valid: boolean;
-    errors: ValidationError[];
-    warnings: ValidationWarning[];
-    dqFindings: DQFinding[];
-  };
-  createdAt: string;
-  updatedAt: string;
+  isEdited: boolean;
+  fileName: string;
+  generatedAt: string;
 }
 
-// Job (main entity)
-export interface SqlJob {
-  id: string;
-  title: string;
-  description: string;
-  inputSource: InputSource;
-  currentStage: WorkflowStage;
-  status: JobStatus;
-  requirements: ExtractedRequirement[];
-  schemaObjects: SchemaObject[];
-  designDecisions: DesignDecision[];
-  sqlArtifacts: SqlArtifact[];
-  progress: number; // 0-100
-  priority: 'low' | 'medium' | 'high' | 'critical';
-  assignee?: string;
-  createdAt: string;
-  updatedAt: string;
-  completedAt?: string;
-}
-
-// Activity log entry
-export interface ActivityEntry {
-  id: string;
-  jobId: string;
-  jobTitle: string;
-  action: string;
-  description: string;
-  stage: WorkflowStage;
-  performedBy: string;
-  timestamp: string;
-}
-
-// Pipeline stats
-export interface PipelineStats {
-  totalJobs: number;
-  intake: number;
-  analyzing: number;
-  generating: number;
-  validating: number;
-  approved: number;
-  deployed: number;
-  needsReview: number;
-  needsApproval: number;
-  failed: number;
+// Detected task info (from auto-detect)
+export interface DetectedTaskInfo {
+  taskType: TaskType;
+  confidence: number;
+  reasoning: string;
 }

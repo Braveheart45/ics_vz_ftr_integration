@@ -160,3 +160,62 @@ Stage Summary:
 - Main page renders all 6 views (dashboard, pipeline, new-job, job-detail, activity, settings)
 - Navigation between views fully functional via Zustand store
 - Complete application is lint-clean and compiles without errors
+---
+Task ID: 1
+Agent: full-stack-developer
+Task: Create new Zustand store for split-screen UI
+
+Work Log:
+- Created /home/z/my-project/src/stores/use-app-store.ts
+- Implemented task type, input mode, chat, SQL output, and pipeline state
+
+Stage Summary:
+- Complete Zustand store for split-screen SQL Agent UI
+- Supports task type switching, Jira/contextual input, file management, chat, SQL editing, and pipeline tracking
+---
+Task ID: 7
+Agent: full-stack-developer
+Task: Create AI chat and generate API routes
+
+Work Log:
+- Created /home/z/my-project/src/app/api/chat/route.ts
+- Created /home/z/my-project/src/app/api/generate/route.ts
+
+Stage Summary:
+- Chat endpoint using z-ai-web-dev-sdk LLM with SQL agent system prompt
+- Generate endpoint for explicit SQL generation
+- Both endpoints handle Jira/context input enrichment
+---
+Task ID: 3
+Agent: full-stack-developer
+Task: Build right panel components for split-screen UI
+
+Work Log:
+- Created task-type-selector.tsx (M3 segmented control)
+- Created jira-input.tsx (Jira project + story input)
+- Created file-upload.tsx (drag & drop file upload)
+- Created context-input.tsx (free text input)
+- Created input-section.tsx (tabbed Jira/Context with submit)
+- Created chat-panel.tsx (AI conversation with streaming)
+- Created right-panel.tsx (complete right panel assembly)
+- Ran ESLint — zero errors
+
+Stage Summary:
+- Complete right panel with task type selection, dual input modes, file upload, and AI chat
+- M3 Material Design segmented control for task type
+- Chat with streaming support, auto-scroll, and markdown rendering
+---
+Task ID: 5
+Agent: full-stack-developer
+Task: Build left panel components for split-screen UI
+
+Work Log:
+- Created pipeline-tracker.tsx (7-stage horizontal tracker with completed/current/future states)
+- Created sql-editor.tsx (oneDark syntax highlighting, edit mode, copy, download, maximize, regenerate, deploy)
+- Created left-panel.tsx (SQL editor + pipeline tracker assembly with maximize behavior)
+- Ran ESLint — zero errors
+
+Stage Summary:
+- SQL editor with oneDark syntax highlighting, edit mode, and 6 action buttons
+- Pipeline tracker with animated current stage indicator and progress percentage
+- Left panel assembly with maximize/restore behavior (tracker hidden when maximized)
