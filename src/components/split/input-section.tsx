@@ -146,12 +146,12 @@ export function InputSection() {
         {isSubmitting ? (
           <>
             <Loader2 className="size-3.5 animate-spin" />
-            <span>Analyzing...</span>
+            <span>Processing...</span>
           </>
         ) : (
           <>
             <Sparkles className="size-3.5" />
-            <span>Submit &amp; Analyze</span>
+            <span>Submit &amp; Generate</span>
           </>
         )}
         </span>
