@@ -1,7 +1,6 @@
 import { create } from 'zustand';
 import type {
   TaskType,
-  InputMode,
   WorkflowStage,
   ChatMessage,
   UploadedFile,
@@ -20,10 +19,6 @@ interface AppState {
   detectedTask: DetectedTaskInfo | null;
   setTaskType: (type: TaskType) => void;
   setDetectedTask: (info: DetectedTaskInfo | null) => void;
-
-  // ── Input Mode ──────────────────────────────────────────
-  inputMode: InputMode;
-  setInputMode: (mode: InputMode) => void;
 
   // ── Jira Input ──────────────────────────────────────────
   jiraInput: JiraInput;
@@ -76,8 +71,6 @@ const initialState = {
   taskType: 'auto_detect' as TaskType,
   detectedTask: null as DetectedTaskInfo | null,
 
-  inputMode: 'jira' as InputMode,
-
   jiraInput: { project: '', storyNumber: '' } as JiraInput,
 
   contextText: '',
@@ -98,29 +91,18 @@ const initialState = {
 // Store
 // ============================================================
 
-export const useAppStore = create<AppState>((set, get) => ({
+export const useAppStore = create<AppState>((set) => ({
   // ── Initial State ─────────────────────────────────────────
   ...initialState,
 
   // ── Task Configuration ───────────────────────────────────
 
   setTaskType: (type) => {
-    // When user manually sets a task type (overriding auto-detect),
-    // update taskType and clear detectedTask
-    set({
-      taskType: type,
-      detectedTask: null,
-    });
+    set({ taskType: type, detectedTask: null });
   },
 
   setDetectedTask: (info) => {
     set({ detectedTask: info });
-  },
-
-  // ── Input Mode ──────────────────────────────────────────
-
-  setInputMode: (mode) => {
-    set({ inputMode: mode });
   },
 
   // ── Jira Input ──────────────────────────────────────────
@@ -157,7 +139,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       id: crypto.randomUUID(),
       timestamp: new Date().toISOString(),
     };
-
     set((state) => ({
       messages: [...state.messages, newMessage],
     }));
@@ -167,13 +148,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((state) => {
       const lastIdx = state.messages.findLastIndex((m) => m.role === 'assistant');
       if (lastIdx === -1) return state;
-
       const updatedMessages = [...state.messages];
-      updatedMessages[lastIdx] = {
-        ...updatedMessages[lastIdx],
-        content,
-      };
-
+      updatedMessages[lastIdx] = { ...updatedMessages[lastIdx], content };
       return { messages: updatedMessages };
     });
   },
@@ -190,11 +166,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setSqlOutput: (output) => {
     if (output) {
-      // When SQL is generated, set stage to 'validation'
-      set({
-        sqlOutput: output,
-        currentStage: 'validation',
-      });
+      set({ sqlOutput: output, currentStage: 'validation' });
     } else {
       set({ sqlOutput: null });
     }
@@ -203,13 +175,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   updateSql: (sql) => {
     set((state) => {
       if (!state.sqlOutput) return state;
-
       return {
-        sqlOutput: {
-          ...state.sqlOutput,
-          sql,
-          isEdited: true,
-        },
+        sqlOutput: { ...state.sqlOutput, sql, isEdited: true },
       };
     });
   },
@@ -227,9 +194,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   // ── Session ─────────────────────────────────────────────
 
   resetSession: () => {
-    set({
-      ...initialState,
-      sessionId: generateSessionId(),
-    });
+    set({ ...initialState, sessionId: generateSessionId() });
   },
 }));

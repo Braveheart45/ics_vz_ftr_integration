@@ -12,7 +12,7 @@ export function LeftPanel() {
   const isMaximized = useAppStore((s) => s.isMaximized);
 
   return (
-    <div className="flex flex-col h-full bg-background border-r">
+    <div className="flex h-full flex-col">
       {/* SQL Editor — takes remaining space */}
       <div className="flex-1 min-h-0 p-2">
         <SqlEditor />
@@ -22,7 +22,7 @@ export function LeftPanel() {
       {!isMaximized && (
         <>
           <div className="border-t" />
-          <div className="shrink-0 h-24 overflow-hidden">
+          <div className="shrink-0 h-[88px] overflow-hidden">
             <PipelineTracker />
           </div>
         </>

@@ -17,59 +17,47 @@ export default function Home() {
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-background">
-      {/* ── Top Header Bar ──────────────────────────────── */}
-      <header className="flex h-12 shrink-0 items-center justify-between border-b bg-background px-4">
-        {/* Left: Branding */}
-        <div className="flex items-center gap-2.5">
-          <div className="flex size-7 items-center justify-center rounded-lg bg-primary">
-            <Database className="size-3.5 text-primary-foreground" />
+      {/* ── Header ─────────────────────────────────────── */}
+      <header className="flex h-11 shrink-0 items-center justify-between border-b px-4">
+        <div className="flex items-center gap-2">
+          <div className="flex size-6 items-center justify-center rounded-md bg-foreground">
+            <Database className="size-3 text-background" />
           </div>
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-semibold tracking-tight">SQLForge</span>
-            <span className="hidden text-[10px] font-medium uppercase tracking-widest text-muted-foreground sm:inline">
-              AI SQL Agent
-            </span>
-          </div>
+          <span className="text-sm font-semibold tracking-tight">SQLForge</span>
         </div>
 
-        {/* Center: Session info */}
-        <div className="hidden items-center gap-2 text-xs text-muted-foreground md:flex">
-          <span className="inline-block size-1.5 rounded-full bg-emerald-500" />
-          <span>Session Active</span>
-          <span className="text-gray-300">|</span>
-          <span className="font-mono text-[10px]">{sessionId.slice(0, 8)}</span>
+        <div className="hidden items-center gap-2 text-[11px] text-muted-foreground/50 md:flex">
+          <span className="size-1.5 rounded-full bg-emerald-400" />
+          <span className="font-mono">{sessionId.slice(0, 8)}</span>
         </div>
 
-        {/* Right: Actions */}
-        <div className="flex items-center gap-1">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-8"
-                onClick={() => resetSession()}
-              >
-                <RotateCcw className="size-3.5" />
-                <span className="sr-only">New Session</span>
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">
-              <p>New Session</p>
-            </TooltipContent>
-          </Tooltip>
-        </div>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="size-7 text-muted-foreground/60 hover:text-foreground"
+              onClick={() => resetSession()}
+            >
+              <RotateCcw className="size-3" />
+              <span className="sr-only">New Session</span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">
+            <p className="text-xs">New Session</p>
+          </TooltipContent>
+        </Tooltip>
       </header>
 
-      {/* ── Split Panel Layout ──────────────────────────── */}
+      {/* ── Split Layout ──────────────────────────────── */}
       <div className="flex min-h-0 flex-1 flex-col md:flex-row">
-        {/* Left Panel — SQL Output & Pipeline (~58%) */}
+        {/* Left — SQL Output & Pipeline */}
         <div className="relative flex min-h-0 flex-1 flex-col border-r md:flex-[58]">
           <LeftPanel />
         </div>
 
-        {/* Right Panel — Intake & Interaction (~42%) */}
-        <div className="relative flex min-h-0 flex-1 flex-col md:flex-[42] md:max-w-[520px] lg:max-w-[580px]">
+        {/* Right — Intake & Interaction */}
+        <div className="relative flex min-h-0 flex-1 flex-col md:flex-[42] md:max-w-[520px] lg:max-w-[560px]">
           <RightPanel />
         </div>
       </div>

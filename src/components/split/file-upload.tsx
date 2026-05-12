@@ -2,7 +2,7 @@
 
 import { useState, useRef, useCallback, type DragEvent } from 'react';
 import { useAppStore } from '@/stores/use-app-store';
-import { Upload, X, FileText, FileSpreadsheet, File, FileCode, FileImage } from 'lucide-react';
+import { Upload, X, FileText } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 // ── Helpers ───────────────────────────────────────────────────
@@ -11,25 +11,6 @@ function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function getFileIcon(type: string) {
-  if (type.includes('csv') || type.includes('spreadsheet') || type.includes('excel')) {
-    return <FileSpreadsheet className="size-4 text-emerald-500" />;
-  }
-  if (type.includes('pdf')) {
-    return <File className="size-4 text-red-500" />;
-  }
-  if (type.includes('word') || type.includes('document')) {
-    return <FileText className="size-4 text-blue-500" />;
-  }
-  if (type.includes('markdown') || type.includes('text') || type.includes('md')) {
-    return <FileCode className="size-4 text-amber-600" />;
-  }
-  if (type.includes('image')) {
-    return <FileImage className="size-4 text-purple-500" />;
-  }
-  return <File className="size-4 text-muted-foreground" />;
 }
 
 const SUPPORTED_FORMATS = ['TXT', 'CSV', 'XLSX', 'DOCX', 'PPTX', 'PDF', 'MD'];
@@ -85,7 +66,6 @@ export function FileUpload() {
   const handleInputChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       handleFiles(e.target.files);
-      // Reset input so the same file can be re-selected
       e.target.value = '';
     },
     [handleFiles]
@@ -105,17 +85,17 @@ export function FileUpload() {
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         className={cn(
-          'flex cursor-pointer flex-col items-center justify-center gap-1.5 rounded-lg border-2 border-dashed p-4 transition-colors',
+          'flex cursor-pointer items-center justify-center gap-2 rounded-lg border border-dashed px-3 py-2.5 transition-colors',
           isDragOver
-            ? 'border-primary/50 bg-primary/5'
-            : 'border-muted-foreground/25 bg-muted/30 hover:border-muted-foreground/40 hover:bg-muted/50'
+            ? 'border-foreground/20 bg-foreground/[0.02]'
+            : 'border-muted-foreground/20 hover:border-muted-foreground/35'
         )}
       >
-        <Upload className="size-5 text-muted-foreground" />
-        <span className="text-xs text-muted-foreground">
-          Drop files here or <span className="font-medium text-foreground">browse</span>
+        <Upload className="size-4 text-muted-foreground/50" />
+        <span className="text-xs text-muted-foreground/60">
+          Attach files
         </span>
-        <span className="text-[10px] text-muted-foreground/60">
+        <span className="text-[10px] text-muted-foreground/30">
           {SUPPORTED_FORMATS.join(' · ')}
         </span>
         <input
@@ -135,18 +115,18 @@ export function FileUpload() {
           {uploadedFiles.map((file) => (
             <div
               key={file.id}
-              className="group flex items-center gap-1.5 rounded-md border bg-background px-2 py-1 text-xs shadow-xs"
+              className="group flex items-center gap-1.5 rounded-md border border-muted-foreground/15 bg-muted/40 px-2 py-1 text-xs"
             >
-              {getFileIcon(file.type)}
-              <span className="max-w-[140px] truncate font-medium">{file.name}</span>
-              <span className="text-muted-foreground/60">{formatFileSize(file.size)}</span>
+              <FileText className="size-3.5 text-muted-foreground/60" />
+              <span className="max-w-[120px] truncate text-foreground/80">{file.name}</span>
+              <span className="text-muted-foreground/40">{formatFileSize(file.size)}</span>
               <button
                 type="button"
                 onClick={(e) => {
                   e.stopPropagation();
                   removeFile(file.id);
                 }}
-                className="ml-0.5 rounded-full p-0.5 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
+                className="ml-0.5 rounded-full p-0.5 text-muted-foreground/40 opacity-0 transition-opacity hover:text-foreground/70 group-hover:opacity-100"
                 aria-label={`Remove ${file.name}`}
               >
                 <X className="size-3" />

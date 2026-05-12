@@ -219,3 +219,29 @@ Stage Summary:
 - SQL editor with oneDark syntax highlighting, edit mode, and 6 action buttons
 - Pipeline tracker with animated current stage indicator and progress percentage
 - Left panel assembly with maximize/restore behavior (tracker hidden when maximized)
+---
+Task ID: 10
+Agent: Main Agent
+Task: Refine SQLForge — unified input, minimal monochrome aesthetic
+
+Work Log:
+- Removed InputMode type and inputMode state from store/types
+- Rewrote InputSection: both Jira AND contextual input always visible together
+- Added subtle "and / or" divider between Jira and context sections
+- Made Jira input optional with labeled fields (Project + Story Number)
+- Unified file upload and context textarea always accessible
+- Overhauled color palette to monochrome/neutral throughout
+- Chat bubbles: user messages use dark foreground bg, assistant uses muted bg
+- Pipeline tracker: black/white checkmarks for completed, neutral dots for future
+- SQL editor toolbar: all actions use muted-foreground hover:text-foreground
+- File icons: all use text-muted-foreground/60 (no per-type colors)
+- Cleaner page header: smaller h-11, reduced text opacity
+- Simplified TaskTypeSelector: cleaner segments, removed auto-detect badge animation
+- Simplified RightPanel: removed collapsible input section toggle
+- Left panel pipeline tracker: cleaner connector lines, reduced height
+
+Stage Summary:
+- Unified input: Jira + files + text all available simultaneously (not mutually exclusive)
+- Minimal monochrome aesthetic throughout — no excessive color usage
+- All 10 split-screen components rewritten for consistency
+- Lint passes clean, dev server compiles successfully

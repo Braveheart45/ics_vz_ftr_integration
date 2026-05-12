@@ -16,18 +16,17 @@ export function ContextInput() {
       <Textarea
         value={contextText}
         onChange={(e) => setContextText(e.target.value)}
-        placeholder="Describe your SQL requirements, provide mapping details, or paste context..."
+        placeholder="Describe requirements, mappings, or paste context..."
         className={cn(
-          'min-h-[100px] max-h-[200px] resize-y text-sm',
-          'scrollbar-thin scrollbar-thumb-muted-foreground/20'
+          'min-h-[80px] max-h-[160px] resize-y text-sm',
+          'placeholder:text-muted-foreground/50'
         )}
         aria-label="Context input"
         maxLength={MAX_CHARS}
       />
-      {/* Character count */}
-      <div className="absolute bottom-2 right-2.5 text-[10px] tabular-nums text-muted-foreground/50">
+      <div className="absolute bottom-2 right-2.5 text-[10px] tabular-nums text-muted-foreground/40">
         {contextText.length.toLocaleString()}
-        <span className="text-muted-foreground/30">/{MAX_CHARS.toLocaleString()}</span>
+        <span className="text-muted-foreground/25">/{MAX_CHARS.toLocaleString()}</span>
       </div>
     </div>
   );

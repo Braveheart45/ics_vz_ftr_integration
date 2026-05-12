@@ -6,9 +6,6 @@
 // Task types
 export type TaskType = 'auto_detect' | 'sql_generation' | 'legacy_sql_conversion';
 
-// Input modes for the right panel
-export type InputMode = 'jira' | 'contextual';
-
 // Workflow pipeline stages
 export type WorkflowStage =
   | 'idle'
@@ -55,14 +52,6 @@ export interface UploadedFile {
 export interface JiraInput {
   project: string;
   storyNumber: string;
-}
-
-// Pipeline stage definition
-export interface PipelineStageDef {
-  id: WorkflowStage;
-  label: string;
-  description: string;
-  icon: string;
 }
 
 // SQL output with metadata

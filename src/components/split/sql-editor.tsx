@@ -11,7 +11,7 @@ import {
   RefreshCw,
   Rocket,
   Code,
-  FileCode,
+  FileCode2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -20,6 +20,7 @@ import { useAppStore } from '@/stores/use-app-store';
 import { toast } from 'sonner';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { cn } from '@/lib/utils';
 
 // ============================================================
 // SQL Editor Component
@@ -45,9 +46,8 @@ export function SqlEditor() {
       await navigator.clipboard.writeText(sqlOutput.sql);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-      toast.success('SQL copied to clipboard');
+      toast.success('Copied to clipboard');
     } catch {
-      // Fallback for older browsers
       const textarea = document.createElement('textarea');
       textarea.value = sqlOutput.sql;
       textarea.style.position = 'fixed';
@@ -58,7 +58,7 @@ export function SqlEditor() {
       document.body.removeChild(textarea);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-      toast.success('SQL copied to clipboard');
+      toast.success('Copied to clipboard');
     }
   }, [sqlOutput]);
 
@@ -74,7 +74,7 @@ export function SqlEditor() {
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
-    toast.success('SQL file downloaded');
+    toast.success('Downloaded');
   }, [sqlOutput]);
 
   // ── Edit Toggle ──────────────────────────────────────────
@@ -89,16 +89,10 @@ export function SqlEditor() {
       const res = await fetch('/api/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages,
-          sessionId,
-          taskType,
-        }),
+        body: JSON.stringify({ messages, sessionId, taskType }),
       });
 
-      if (!res.ok) {
-        throw new Error('Generation failed');
-      }
+      if (!res.ok) throw new Error('Generation failed');
 
       const data = await res.json();
       if (data.sql) {
@@ -108,10 +102,10 @@ export function SqlEditor() {
           fileName: 'generated_sql.sql',
           generatedAt: new Date().toISOString(),
         });
-        toast.success('SQL regenerated successfully');
+        toast.success('Regenerated');
       }
     } catch {
-      toast.error('Failed to regenerate SQL');
+      toast.error('Failed to regenerate');
     } finally {
       setIsRegenerating(false);
     }
@@ -119,7 +113,7 @@ export function SqlEditor() {
 
   // ── Deploy ───────────────────────────────────────────────
   const handleDeploy = useCallback(() => {
-    toast.success('SQL deployment initiated');
+    toast.success('Deployment initiated');
   }, []);
 
   // ── Edit SQL ─────────────────────────────────────────────
@@ -130,25 +124,56 @@ export function SqlEditor() {
     [updateSql]
   );
 
+  // ── Toolbar button ───────────────────────────────────────
+  function ToolBtn({
+    onClick,
+    disabled,
+    title,
+    children,
+    active,
+  }: {
+    onClick: () => void;
+    disabled?: boolean;
+    title: string;
+    children: React.ReactNode;
+    active?: boolean;
+  }) {
+    return (
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={onClick}
+        disabled={disabled}
+        title={title}
+        className={cn(
+          'h-7 w-7 p-0 text-muted-foreground/70 hover:text-foreground',
+          active && 'text-foreground'
+        )}
+      >
+        {children}
+      </Button>
+    );
+  }
+
   // ============================================================
   // Render
   // ============================================================
 
   const editorContent = (
-    <div className="flex flex-col h-full bg-background rounded-lg border overflow-hidden">
+    <div className="flex h-full flex-col overflow-hidden rounded-lg border">
       {/* ── Toolbar ──────────────────────────────────────── */}
-      <div className="flex items-center justify-between bg-muted/50 border-b px-3 py-2 shrink-0">
+      <div className="flex items-center justify-between border-b bg-muted/30 px-2.5 py-1.5 shrink-0">
         {/* Left: File tab */}
         <div className="flex items-center gap-2 min-w-0">
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-background border text-sm font-medium text-foreground">
-            <FileCode className="size-3.5 text-blue-500" />
-            <span className="truncate">{sqlOutput?.fileName || 'generated_sql.sql'}</span>
+          <div className="flex items-center gap-1.5 rounded-md bg-background px-2 py-0.5 text-xs font-medium text-foreground/80 border">
+            <FileCode2 className="size-3 text-muted-foreground/60" />
+            <span className="truncate max-w-[160px]">{sqlOutput?.fileName || 'output.sql'}</span>
           </div>
-          <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
-            BigQuery SQL
-          </Badge>
           {sqlOutput?.isEdited && (
-            <Badge variant="outline" className="text-[10px] px-1.5 py-0 text-amber-600 border-amber-300">
+            <Badge
+              variant="outline"
+              className="text-[10px] px-1.5 py-0 text-muted-foreground/70 border-muted-foreground/20"
+            >
               Modified
             </Badge>
           )}
@@ -156,83 +181,32 @@ export function SqlEditor() {
 
         {/* Right: Actions */}
         <div className="flex items-center gap-0.5 shrink-0">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={handleCopy}
-            disabled={!sqlOutput}
-            title="Copy SQL"
-            className="h-7 w-7 p-0"
-          >
-            {copied ? <Check className="size-3.5 text-emerald-500" /> : <Copy className="size-3.5" />}
-          </Button>
-
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={handleDownload}
-            disabled={!sqlOutput}
-            title="Download .sql"
-            className="h-7 w-7 p-0"
-          >
+          <ToolBtn onClick={handleCopy} disabled={!sqlOutput} title="Copy">
+            {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+          </ToolBtn>
+          <ToolBtn onClick={handleDownload} disabled={!sqlOutput} title="Download">
             <Download className="size-3.5" />
-          </Button>
-
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={handleEditToggle}
-            disabled={!sqlOutput}
-            title={isEditing ? 'View mode' : 'Edit mode'}
-            className={`h-7 w-7 p-0 ${isEditing ? 'text-primary' : ''}`}
-          >
+          </ToolBtn>
+          <ToolBtn onClick={handleEditToggle} disabled={!sqlOutput} title={isEditing ? 'View' : 'Edit'} active={isEditing}>
             <Pencil className="size-3.5" />
-          </Button>
+          </ToolBtn>
+          <ToolBtn onClick={toggleMaximize} title={isMaximized ? 'Minimize' : 'Maximize'}>
+            {isMaximized ? <Minimize2 className="size-3.5" /> : <Maximize2 className="size-3.5" />}
+          </ToolBtn>
 
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={toggleMaximize}
-            title={isMaximized ? 'Minimize' : 'Maximize'}
-            className="h-7 w-7 p-0"
-          >
-            {isMaximized ? (
-              <Minimize2 className="size-3.5" />
-            ) : (
-              <Maximize2 className="size-3.5" />
-            )}
-          </Button>
+          <div className="mx-1 h-4 w-px bg-border" />
 
-          <div className="w-px h-4 bg-border mx-1" />
-
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={handleRegenerate}
-            disabled={!sqlOutput || isRegenerating}
-            title="Regenerate SQL"
-            className="h-7 w-7 p-0"
-          >
-            <RefreshCw
-              className={`size-3.5 ${isRegenerating ? 'animate-spin' : ''}`}
-            />
-          </Button>
-
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={handleDeploy}
-            disabled={!sqlOutput}
-            title="Deploy SQL"
-            className="h-7 w-7 p-0 text-emerald-600 hover:text-emerald-700"
-          >
+          <ToolBtn onClick={handleRegenerate} disabled={!sqlOutput || isRegenerating} title="Regenerate">
+            <RefreshCw className={cn('size-3.5', isRegenerating && 'animate-spin')} />
+          </ToolBtn>
+          <ToolBtn onClick={handleDeploy} disabled={!sqlOutput} title="Deploy">
             <Rocket className="size-3.5" />
-          </Button>
+          </ToolBtn>
         </div>
       </div>
 
       {/* ── Code Area ────────────────────────────────────── */}
-      <div className="flex-1 min-h-0 overflow-auto">
+      <div className="flex-1 min-h-0 overflow-auto custom-scrollbar">
         {sqlOutput ? (
           isEditing ? (
             <Textarea
@@ -272,18 +246,13 @@ export function SqlEditor() {
           )
         ) : (
           /* ── Empty State ───────────────────────────────── */
-          <div className="flex flex-col items-center justify-center h-full text-center p-8">
-            <div className="rounded-2xl border-2 border-dashed border-muted-foreground/20 p-10 flex flex-col items-center gap-3 max-w-sm">
-              <div className="size-12 rounded-full bg-muted flex items-center justify-center">
-                <Code className="size-6 text-muted-foreground" />
-              </div>
-              <p className="text-sm font-medium text-muted-foreground">
-                Generated SQL will appear here
-              </p>
-              <p className="text-xs text-muted-foreground/70">
-                Submit your requirements to get started
-              </p>
+          <div className="flex h-full flex-col items-center justify-center text-center p-8">
+            <div className="flex size-10 items-center justify-center rounded-full bg-muted/50">
+              <Code className="size-5 text-muted-foreground/50" />
             </div>
+            <p className="mt-3 text-sm text-muted-foreground/60">
+              Generated SQL will appear here
+            </p>
           </div>
         )}
       </div>
@@ -294,12 +263,10 @@ export function SqlEditor() {
   if (isMaximized) {
     return (
       <>
-        {/* Dark backdrop */}
         <div
-          className="fixed inset-0 bg-black/50 z-40"
+          className="fixed inset-0 bg-black/40 backdrop-blur-[2px] z-40"
           onClick={toggleMaximize}
         />
-        {/* Maximized editor */}
         <div className="fixed inset-4 z-50">{editorContent}</div>
       </>
     );

@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useCallback } from 'react';
-import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { useAppStore } from '@/stores/use-app-store';
 import { JiraInput } from './jira-input';
@@ -9,6 +8,7 @@ import { FileUpload } from './file-upload';
 import { ContextInput } from './context-input';
 import { Sparkles, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
+import { Label } from '@/components/ui/label';
 
 // ── Component ─────────────────────────────────────────────────
 export function InputSection() {
@@ -18,31 +18,22 @@ export function InputSection() {
   const addMessage = useAppStore((s) => s.addMessage);
   const setStage = useAppStore((s) => s.setStage);
   const taskType = useAppStore((s) => s.taskType);
-  const inputMode = useAppStore((s) => s.inputMode);
-  const setInputMode = useAppStore((s) => s.setInputMode);
   const sessionId = useAppStore((s) => s.sessionId);
   const messages = useAppStore((s) => s.messages);
-  const setStreaming = useAppStore((s) => s.setStreaming);
-  const updateLastAssistantMessage = useAppStore((s) => s.updateLastAssistantMessage);
-
-  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const buildUserMessage = useCallback((): string | null => {
     const parts: string[] = [];
 
-    // Jira context
     if (jiraInput.project.trim() && jiraInput.storyNumber.trim()) {
       parts.push(
         `[Jira] Project: ${jiraInput.project}, Story: ${jiraInput.storyNumber}`
       );
     }
 
-    // Context text
     if (contextText.trim()) {
       parts.push(contextText.trim());
     }
 
-    // File references
     if (uploadedFiles.length > 0) {
       const fileNames = uploadedFiles.map((f) => f.name).join(', ');
       parts.push(`[Attached files: ${fileNames}]`);
@@ -50,6 +41,8 @@ export function InputSection() {
 
     return parts.length > 0 ? parts.join('\n\n') : null;
   }, [jiraInput, contextText, uploadedFiles]);
+
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   const handleSubmit = useCallback(async () => {
     const userContent = buildUserMessage();
@@ -60,11 +53,8 @@ export function InputSection() {
 
     setIsSubmitting(true);
     setStage('intake');
-
-    // Add user message
     addMessage({ role: 'user', content: userContent });
 
-    // Build messages payload for the API
     const chatHistory = messages.map((m) => ({
       role: m.role,
       content: m.content,
@@ -79,9 +69,7 @@ export function InputSection() {
           messages: chatHistory,
           sessionId,
           taskType,
-          jiraInput: jiraInput.project.trim()
-            ? jiraInput
-            : undefined,
+          jiraInput: jiraInput.project.trim() ? jiraInput : undefined,
           contextText: contextText.trim() || undefined,
         }),
       });
@@ -92,73 +80,58 @@ export function InputSection() {
       }
 
       const data = await res.json();
-
-      // Add assistant message
-      setStreaming(true);
       addMessage({ role: 'assistant', content: data.content });
-      setStreaming(false);
     } catch (error) {
-      setStreaming(false);
       const errorMessage =
         error instanceof Error ? error.message : 'Something went wrong';
       addMessage({
         role: 'assistant',
-        content: `⚠️ Error: ${errorMessage}. Please try again.`,
+        content: `Error: ${errorMessage}. Please try again.`,
       });
       toast.error('Failed to submit. Check the chat for details.');
     } finally {
       setIsSubmitting(false);
     }
-  }, [
-    buildUserMessage,
-    messages,
-    sessionId,
-    taskType,
-    jiraInput,
-    contextText,
-    addMessage,
-    setStage,
-    setStreaming,
-    updateLastAssistantMessage,
-  ]);
+  }, [buildUserMessage, messages, sessionId, taskType, jiraInput, contextText, addMessage, setStage]);
 
   return (
-    <div className="flex flex-col gap-3">
-      <Tabs value={inputMode} onValueChange={(v) => setInputMode(v as 'jira' | 'contextual')}>
-        <TabsList className="h-8 w-full">
-          <TabsTrigger value="jira" className="flex-1 text-xs">
-            Jira Story
-          </TabsTrigger>
-          <TabsTrigger value="contextual" className="flex-1 text-xs">
-            Context
-          </TabsTrigger>
-        </TabsList>
+    <div className="flex flex-col gap-4">
+      {/* Jira Story (optional) */}
+      <div className="flex flex-col gap-1.5">
+        <Label className="text-xs font-medium text-muted-foreground">
+          Jira Story <span className="text-muted-foreground/40 font-normal">(optional)</span>
+        </Label>
+        <JiraInput />
+      </div>
 
-        <TabsContent value="jira" className="mt-2">
-          <JiraInput />
-        </TabsContent>
+      {/* Divider */}
+      <div className="flex items-center gap-2">
+        <div className="flex-1 h-px bg-border" />
+        <span className="text-[10px] text-muted-foreground/40 uppercase tracking-wider">and / or</span>
+        <div className="flex-1 h-px bg-border" />
+      </div>
 
-        <TabsContent value="contextual" className="mt-2 flex flex-col gap-3">
-          <FileUpload />
-          <ContextInput />
-        </TabsContent>
-      </Tabs>
+      {/* File Upload */}
+      <FileUpload />
 
-      {/* Submit button */}
+      {/* Context Text */}
+      <ContextInput />
+
+      {/* Submit */}
       <Button
         onClick={handleSubmit}
         disabled={isSubmitting}
-        className="w-full"
+        className="w-full h-9"
         size="default"
       >
         {isSubmitting ? (
           <>
-            <Loader2 className="size-4 animate-spin" />
+            <Loader2 className="size-3.5 animate-spin" />
             Analyzing...
           </>
         ) : (
           <>
-            <Sparkles className="size-4" />
+            <Sparkles className="size-3.5" />
             Submit & Analyze
           </>
         )}
