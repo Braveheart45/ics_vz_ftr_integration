@@ -74,6 +74,26 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
+// ── Project Discovery Cache ─────────────────────────────────
+// Cache discovery results to avoid spamming Claude CLI on every dropdown open
+const projectCache = {
+  jira: { data: null, timestamp: 0, ttl: 5 * 60 * 1000 },  // 5 min TTL
+  bq:   { data: null, timestamp: 0, ttl: 5 * 60 * 1000 },
+};
+
+function getCachedProjects(type) {
+  const cache = projectCache[type];
+  if (cache.data && Date.now() - cache.timestamp < cache.ttl) {
+    return cache.data;
+  }
+  return null;
+}
+
+function setCachedProjects(type, data) {
+  projectCache[type].data = data;
+  projectCache[type].timestamp = Date.now();
+}
+
 // ── Active request tracking (for concurrency limits) ──────────
 
 let activeRequests = 0;
@@ -412,6 +432,93 @@ async function runClaude(prompt, sessionId, request, onEvent) {
   });
 }
 
+// ── Quick Claude Runner (for discovery queries) ──────────────
+// Spawns Claude with a single-turn limit, returns raw text output.
+// Used for project listing — lightweight, fast.
+
+async function runQuickClaude(prompt, timeoutMs = 30000) {
+  const claudeBin = findClaude();
+  if (!claudeBin) throw new Error('Claude CLI not found');
+
+  if (activeRequests >= MAX_CONCURRENT) {
+    throw new Error(`Server busy. ${MAX_CONCURRENT} concurrent requests max.`);
+  }
+
+  activeRequests++;
+
+  return new Promise((resolve, reject) => {
+    let proc = null;
+    let timeoutId = null;
+    let accumulatedText = '';
+
+    const cleanup = () => {
+      clearTimeout(timeoutId);
+      activeRequests--;
+      if (proc && !proc.killed) {
+        proc.kill('SIGTERM');
+        setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* dead */ } }, 2000);
+      }
+    };
+
+    proc = spawn(claudeBin, [
+      '-p', '-',
+      '--output-format', 'stream-json',
+      '--max-turns', '1',
+      '--verbose',
+    ], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, HOME: os.homedir() },
+    });
+
+    timeoutId = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Discovery timed out after ${timeoutMs / 1000}s`));
+    }, timeoutMs);
+
+    let buffer = '';
+    proc.stdout.on('data', (chunk) => {
+      buffer += chunk.toString('utf-8');
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const parsed = JSON.parse(line);
+          // Extract text content
+          if (parsed.type === 'content_block_delta' && parsed.delta?.type === 'text_delta' && parsed.delta.text) {
+            accumulatedText += parsed.delta.text;
+          }
+          if (parsed.type === 'assistant' && parsed.message?.content) {
+            for (const c of parsed.message.content) {
+              if (c.type === 'text' && c.text) accumulatedText += c.text;
+            }
+          }
+        } catch { /* skip */ }
+      }
+    });
+
+    proc.stderr.on('data', (chunk) => {
+      const text = chunk.toString('utf-8').trim();
+      if (text) console.error(`  [discover stderr] ${text}`);
+    });
+
+    proc.stdin.write(prompt, (err) => {
+      if (err) { cleanup(); reject(new Error(`Failed to write: ${err.message}`)); return; }
+      proc.stdin.end();
+    });
+
+    proc.on('close', (code) => {
+      cleanup();
+      resolve({ success: code === 0, text: accumulatedText });
+    });
+
+    proc.on('error', (err) => {
+      cleanup();
+      reject(new Error(`Failed to spawn Claude: ${err.message}`));
+    });
+  });
+}
+
 // ── JSON-Lines Parser ─────────────────────────────────────────
 // Handles the various event types from `claude --output-format stream-json`
 // Reference: https://docs.anthropic.com/en/docs/claude-code/cli-reference
@@ -578,6 +685,8 @@ const server = http.createServer(async (req, res) => {
       endpoints: {
         'POST /chat': 'Send prompt to Claude CLI, returns SSE stream',
         'GET /health': 'Health check with Claude CLI status',
+        'GET /discover/jira-projects': 'List accessible Jira projects',
+        'GET /discover/bq-projects': 'List accessible BigQuery projects',
         'DELETE /session/:id': 'Clear session history',
       },
       mcpServers: 'Configured via ~/.claude.json',
@@ -723,11 +832,124 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── GET /discover/jira-projects ──────────────────────
+  if (req.method === 'GET' && req.url === '/discover/jira-projects') {
+    // Check cache first
+    const cached = getCachedProjects('jira');
+    if (cached) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ projects: cached, cached: true }));
+      return;
+    }
+
+    // Check Claude CLI
+    if (!findClaude()) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Claude CLI not found' }));
+      return;
+    }
+
+    console.log('  [discover] Fetching Jira projects...');
+
+    try {
+      const result = await runQuickClaude(
+        'Use your Jira MCP tool to list all accessible Jira projects. ' +
+        'Return ONLY a valid JSON array of objects with "key" and "name" fields, like: ' +
+        '[{"key":"PROJ","name":"Project Name"}]. ' +
+        'Do NOT include any other text, explanation, or markdown code blocks. Just the raw JSON array.'
+      );
+
+      // Try to parse JSON from the response
+      let projects = [];
+      const jsonMatch = result.text.match(/\[[\s\S]*\]/);
+      if (jsonMatch) {
+        try {
+          projects = JSON.parse(jsonMatch[0]);
+          if (!Array.isArray(projects)) projects = [];
+          // Validate structure
+          projects = projects.filter(p => p.key).map(p => ({
+            key: String(p.key),
+            name: String(p.name || p.key),
+          }));
+        } catch { /* parse failed */ }
+      }
+
+      // Cache the result
+      if (projects.length > 0) {
+        setCachedProjects('jira', projects);
+        console.log(`  [discover] Cached ${projects.length} Jira projects`);
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ projects, cached: false }));
+    } catch (err) {
+      console.error('  [discover] Jira projects error:', err.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message, projects: [] }));
+    }
+    return;
+  }
+
+  // ── GET /discover/bq-projects ────────────────────────
+  if (req.method === 'GET' && req.url === '/discover/bq-projects') {
+    // Check cache first
+    const cached = getCachedProjects('bq');
+    if (cached) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ projects: cached, cached: true }));
+      return;
+    }
+
+    // Check Claude CLI
+    if (!findClaude()) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Claude CLI not found' }));
+      return;
+    }
+
+    console.log('  [discover] Fetching BigQuery projects...');
+
+    try {
+      const result = await runQuickClaude(
+        'Use your BigQuery MCP tool to list all accessible Google Cloud projects that have BigQuery datasets. ' +
+        'Return ONLY a valid JSON array of project ID strings, like: ["project-1","project-2"]. ' +
+        'Do NOT include any other text, explanation, or markdown code blocks. Just the raw JSON array.'
+      );
+
+      // Try to parse JSON from the response
+      let projects = [];
+      const jsonMatch = result.text.match(/\[[\s\S]*\]/);
+      if (jsonMatch) {
+        try {
+          const parsed = JSON.parse(jsonMatch[0]);
+          if (Array.isArray(parsed)) {
+            // Handle both string arrays and object arrays
+            projects = parsed.map(p => typeof p === 'string' ? p : p.id || p.projectId || p.name).filter(Boolean);
+          }
+        } catch { /* parse failed */ }
+      }
+
+      // Cache the result
+      if (projects.length > 0) {
+        setCachedProjects('bq', projects);
+        console.log(`  [discover] Cached ${projects.length} BQ projects`);
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ projects, cached: false }));
+    } catch (err) {
+      console.error('  [discover] BQ projects error:', err.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message, projects: [] }));
+    }
+    return;
+  }
+
   // ── 404 ────────────────────────────────────────────────
   res.writeHead(404, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({
     error: 'Not found',
-    endpoints: ['POST /chat', 'GET /health', 'DELETE /session/:id'],
+    endpoints: ['POST /chat', 'GET /health', 'GET /discover/jira-projects', 'GET /discover/bq-projects', 'DELETE /session/:id'],
   }));
 });
 
@@ -749,6 +971,8 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log('  ║     POST /chat         Send prompt → Claude   ║');
   console.log('  ║     GET  /health       Health check           ║');
   console.log('  ║     DELETE /session/:id Clear session history ║');
+  console.log('  ║     GET  /discover/jira-projects  List Jira projects    ║');
+  console.log('  ║     GET  /discover/bq-projects    List BQ projects     ║');
   console.log('  ╠══════════════════════════════════════════════╣');
   console.log('  ║   MCP Tools: Jira, BigQuery, GitHub            ║');
   console.log('  ║   Config:    ~/.claude.json                    ║');
