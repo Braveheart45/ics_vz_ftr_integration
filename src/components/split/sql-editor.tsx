@@ -30,9 +30,10 @@ interface SSEToolResultEvent { type: 'tool_result'; tool: string; success: boole
 interface SSEMessageEvent { type: 'message'; content: string }
 interface SSESQLEvent { type: 'sql'; sql: string; fileName: string }
 interface SSEErrorEvent { type: 'error'; message: string }
-interface SSEDoneEvent { type: 'done' }
+interface SSEDoneEvent { type: 'done'; success?: boolean }
+interface SSEClarificationEvent { type: 'clarification'; message: string; needsInput: boolean }
 
-type SSEEvent = SSEStatusEvent | SSEToolCallEvent | SSEToolResultEvent | SSEMessageEvent | SSESQLEvent | SSEErrorEvent | SSEDoneEvent;
+type SSEEvent = SSEStatusEvent | SSEToolCallEvent | SSEToolResultEvent | SSEMessageEvent | SSESQLEvent | SSEErrorEvent | SSEDoneEvent | SSEClarificationEvent;
 
 // ============================================================
 // SQL Editor Component
@@ -200,10 +201,15 @@ export function SqlEditor() {
         break;
       case 'error':
         store.addMessage({ role: 'assistant', content: `Error regenerating: ${event.message}` });
+        store.setInteractionState('error');
+        break;
+      case 'clarification':
+        store.setPendingClarification({ message: event.message, needsInput: event.needsInput });
         break;
       case 'done':
         store.setStreaming(false);
         store.setAgentRunning(false);
+        if (event.success) store.setInteractionState('sql_generated');
         break;
     }
   }

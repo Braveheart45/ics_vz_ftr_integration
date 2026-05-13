@@ -83,3 +83,18 @@ export interface ToolCallLog {
   summary?: string;
   timestamp: string;
 }
+
+// Clarification prompt (when Claude needs more info from user)
+export interface ClarificationRequest {
+  message: string;
+  needsInput: boolean;
+  timestamp?: number;
+}
+
+// Bidirectional interaction state
+export type AgentInteractionState =
+  | 'idle'
+  | 'processing'
+  | 'awaiting_clarification'
+  | 'sql_generated'
+  | 'error';

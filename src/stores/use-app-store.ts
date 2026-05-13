@@ -9,6 +9,8 @@ import type {
   SqlOutput,
   DetectedTaskInfo,
   ToolCallLog,
+  ClarificationRequest,
+  AgentInteractionState,
 } from '@/lib/types';
 
 // ============================================================
@@ -66,7 +68,11 @@ interface AppState {
 
   // ── Agent ───────────────────────────────────────────────
   isAgentRunning: boolean;
+  interactionState: AgentInteractionState;
+  pendingClarification: ClarificationRequest | null;
   setAgentRunning: (running: boolean) => void;
+  setInteractionState: (state: AgentInteractionState) => void;
+  setPendingClarification: (clarification: ClarificationRequest | null) => void;
 
   // ── Session ─────────────────────────────────────────────
   sessionId: string;
@@ -107,6 +113,8 @@ const initialState = {
   stageMessage: '',
 
   isAgentRunning: false,
+  interactionState: 'idle' as AgentInteractionState,
+  pendingClarification: null as ClarificationRequest | null,
 
   sessionId: generateSessionId(),
 };
@@ -268,7 +276,22 @@ export const useAppStore = create<AppState>((set) => ({
   // ── Agent ───────────────────────────────────────────────
 
   setAgentRunning: (running) => {
-    set({ isAgentRunning: running });
+    set({
+      isAgentRunning: running,
+      interactionState: running ? 'processing' : 'idle',
+    });
+  },
+
+  setInteractionState: (state) => {
+    set({ interactionState: state });
+  },
+
+  setPendingClarification: (clarification) => {
+    set({
+      pendingClarification: clarification,
+      interactionState: clarification ? 'awaiting_clarification' : 'idle',
+      isAgentRunning: false,
+    });
   },
 
   // ── Session ─────────────────────────────────────────────

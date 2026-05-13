@@ -273,3 +273,40 @@ Stage Summary:
 - Visual hierarchy through: font-weight variations, tracking, opacity layers
 - Refined interactive states with smooth 200ms transitions
 - Lint passes clean, dev server compiles successfully
+---
+Task ID: 12
+Agent: Main Agent
+Task: Claude Code CLI Bridge, Bidirectional Interaction, and Runbook
+
+Work Log:
+- Created mini-services/claude-bridge/package.json (proper mini-service config)
+- Created mini-services/claude-bridge/index.js (improved bridge with fixes):
+  - Fixed duplicate proc.stdin.write() bug from original claude-bridge.js
+  - Added clarification detection (isClarificationRequest) with pattern matching
+  - Added conversation ID resumption via --resume flag
+  - Added DELETE /session/:id endpoint for session cleanup
+  - Better JSON-Lines parsing for Claude stream-json output format
+  - Proper scoping of accumulatedText (returned in resolve)
+  - Added --hot support via bun for development
+- Updated src/app/api/generate/route.ts to support bridge mode (was missing)
+- Updated src/lib/types.ts: Added ClarificationRequest, AgentInteractionState
+- Updated src/stores/use-app-store.ts: Added interactionState, pendingClarification, setInteractionState, setPendingClarification
+- Updated src/components/split/chat-panel.tsx:
+  - Added SSEClarificationEvent type and handler
+  - Added "Claude needs more information" orange banner
+  - Dynamic placeholder when awaiting clarification
+  - Clears clarification state on user response
+- Updated src/components/split/input-section.tsx: Added clarification event handling
+- Updated src/components/split/sql-editor.tsx: Added clarification event handling
+- Created .env.example with all configuration variables documented
+- Created comprehensive RUNBOOK.md (12 sections, 500+ lines)
+- ESLint: zero errors
+- Verified claude-bridge starts and health endpoint responds
+
+Stage Summary:
+- Full Claude Code CLI integration with local-only, API-free architecture
+- Bidirectional interaction: Claude can ask questions, user responds via chat
+- Three response modes: form fields, chat follow-up, regenerate
+- Comprehensive runbook covering architecture, setup, troubleshooting, security
+- Bridge runs as independent mini-service on port 3001
+- Conversation resumption via Claude's --resume flag

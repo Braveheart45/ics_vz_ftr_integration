@@ -5,7 +5,7 @@ import { useAppStore } from '@/stores/use-app-store';
 import { cn } from '@/lib/utils';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
-import { Send, Bot, User, Loader2, Wrench, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Send, Bot, User, Loader2, Wrench, CheckCircle2, AlertCircle, MessageCircleQuestion } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { formatDistanceToNow } from 'date-fns';
 import type { WorkflowStage } from '@/lib/types';
@@ -48,6 +48,13 @@ interface SSEErrorEvent {
 
 interface SSEDoneEvent {
   type: 'done';
+  success?: boolean;
+}
+
+interface SSEClarificationEvent {
+  type: 'clarification';
+  message: string;
+  needsInput: boolean;
 }
 
 type SSEEvent =
@@ -57,7 +64,8 @@ type SSEEvent =
   | SSEMessageEvent
   | SSESQLEvent
   | SSEErrorEvent
-  | SSEDoneEvent;
+  | SSEDoneEvent
+  | SSEClarificationEvent;
 
 // ── Streaming dots animation ──────────────────────────────────
 function StreamingDots() {
@@ -233,10 +241,20 @@ function useSSEStream() {
             });
             useAppStore.getState().setStreaming(false);
             useAppStore.getState().setAgentRunning(false);
+            useAppStore.getState().setInteractionState('error');
+            break;
+          case 'clarification':
+            useAppStore.getState().setPendingClarification({
+              message: event.message,
+              needsInput: event.needsInput,
+            });
             break;
           case 'done':
             useAppStore.getState().setStreaming(false);
             useAppStore.getState().setAgentRunning(false);
+            if (event.success) {
+              useAppStore.getState().setInteractionState('sql_generated');
+            }
             break;
         }
       };
@@ -297,6 +315,8 @@ export function ChatPanel() {
   const isAgentRunning = useAppStore((s) => s.isAgentRunning);
   const sessionId = useAppStore((s) => s.sessionId);
   const taskType = useAppStore((s) => s.taskType);
+  const pendingClarification = useAppStore((s) => s.pendingClarification);
+  const interactionState = useAppStore((s) => s.interactionState);
   const addMessage = useAppStore((s) => s.addMessage);
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -318,6 +338,10 @@ export function ChatPanel() {
     setFollowUp('');
     setIsSending(true);
     addMessage({ role: 'user', content: trimmed });
+
+    // Clear any pending clarification since user is responding
+    useAppStore.getState().setPendingClarification(null);
+
     useAppStore.getState().setStreaming(true);
     useAppStore.getState().setAgentRunning(true);
     useAppStore.getState().clearToolLogs();
@@ -350,6 +374,8 @@ export function ChatPanel() {
     },
     [sendFollowUp]
   );
+
+  const isAwaitingClarification = interactionState === 'awaiting_clarification' && pendingClarification;
 
   const hasMessages = messages.length > 0;
   const hasToolLogs = toolLogs.length > 0;
@@ -398,6 +424,25 @@ export function ChatPanel() {
           </div>
         )}
 
+        {/* Clarification prompt — shows when Claude needs more info */}
+        {isAwaitingClarification && (
+          <div className="px-4 pb-2 animate-fade-in">
+            <div className="rounded-xl border border-[#F97316]/20 bg-[#FFF7ED]/80 px-3.5 py-2.5 shadow-[0_1px_3px_0_oklch(0.65_0.2_45/0.08)]">
+              <div className="flex items-center gap-2 mb-1.5">
+                <div className="flex size-5 shrink-0 items-center justify-center rounded-full bg-[#F97316]/10">
+                  <MessageCircleQuestion className="size-3 text-[#F97316]" />
+                </div>
+                <span className="text-[11px] font-bold text-[#F97316]/90 uppercase tracking-[0.05em]">
+                  Claude needs more information
+                </span>
+              </div>
+              <p className="text-xs font-medium text-foreground/70 leading-relaxed">
+                Type your response in the input below to continue.
+              </p>
+            </div>
+          </div>
+        )}
+
         {/* Tool call progress */}
         {hasToolLogs && (
           <div className="flex flex-col gap-1.5 pb-2">
@@ -433,7 +478,7 @@ export function ChatPanel() {
               value={followUp}
               onChange={(e) => setFollowUp(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Follow up or clarify..."
+              placeholder={isAwaitingClarification ? "Respond to Claude's question..." : "Follow up or clarify..."}
               className="min-h-[38px] max-h-[100px] resize-none text-sm leading-relaxed placeholder:text-foreground/50 pr-10"
               rows={1}
               aria-label="Follow-up message"
