@@ -109,7 +109,7 @@
 | **Bridge Pattern** | Separate Node.js mini-service | Isolation from Next.js process. Independent scaling, crash recovery |
 | **Conversation Context** | In-memory session store + `--resume` flag | Claude maintains context across multi-turn interactions |
 | **Bidirectional** | Chat panel follow-up + clarification events | Claude can ask questions, user responds through same chat workflow |
-| **Fallback** | Built-in agent (z-ai-web-dev-sdk) | Works without Claude CLI for demo/testing. Mock data when no credentials |
+| **Fallback** | Built-in agent (z-ai-web-dev-sdk) | Works without Claude CLI for basic testing. Requires real credentials for Jira/BQ/GitHub APIs |
 
 ### 1.3 Confirmation: API-Free Architecture
 
@@ -244,16 +244,16 @@ curl http://127.0.0.1:3001/health
 curl http://localhost:3000
 ```
 
-### 3.4 Running Without Claude CLI (Demo Mode)
+### 3.4 Running Without Claude CLI (Direct Mode)
 
-If Claude Code CLI is not installed, the application falls back to a built-in agent that uses the `z-ai-web-dev-sdk` with mock data. To force this:
+If Claude Code CLI is not installed, the application falls back to a built-in agent that uses the `z-ai-web-dev-sdk` with direct API clients. To force this:
 
 ```bash
 # In .env.local:
 USE_CLAUDE_BRIDGE=false
 ```
 
-The demo mode still shows the full UI with simulated tool calls, pipeline progression, and generated SQL.
+> **Note:** Direct mode requires real API credentials configured in environment variables (JIRA_BASE_URL, JIRA_USER_EMAIL, JIRA_API_TOKEN, GCP_PROJECT_ID, GCP_ACCESS_TOKEN). Without Claude CLI, there is no MCP-based tool access. Configure credentials in `.env.local`.
 
 ---
 
@@ -640,8 +640,9 @@ sqlforge/
 │   ├── lib/
 │   │   ├── types.ts                      # ★ TypeScript types + bidirectional state
 │   │   ├── agent.ts                      # Built-in agent (z-ai-web-dev-sdk fallback)
-│   │   ├── api-clients.ts               # Jira/BQ/GitHub clients (mock fallback)
-│   │   ├── mock-data.ts                  # Comprehensive mock data
+│   │   ├── api-clients.ts               # Jira/BQ/GitHub clients (real API only)
+│   │   ├── sse-client.ts                 # Shared SSE types + event dispatcher
+│   │   ├── bridge-forwarder.ts           # Shared Claude Bridge forwarding logic
 │   │   ├── db.ts                         # Prisma client
 │   │   └── utils.ts                      # cn() utility
 │   └── stores/

@@ -59,8 +59,8 @@ export class SSEStream {
   }
 
   /** Signal completion */
-  done() {
-    this.send('done', { timestamp: Date.now() });
+  done(success: boolean = true) {
+    this.send('done', { timestamp: Date.now(), success });
   }
 
   /** Signal error */

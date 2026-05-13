@@ -3,6 +3,12 @@ import { NextResponse } from 'next/server';
 const USE_BRIDGE = process.env.USE_CLAUDE_BRIDGE === 'true';
 const BRIDGE_PORT = process.env.BRIDGE_PORT || '3001';
 
+function fetchWithTimeout(url: string, timeoutMs: number = 35000): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { signal: controller.signal }).finally(() => clearTimeout(timeout));
+}
+
 export async function GET() {
   if (!USE_BRIDGE) {
     return NextResponse.json(
@@ -12,9 +18,7 @@ export async function GET() {
   }
 
   try {
-    const res = await fetch(`/discover/bq-projects?XTransformPort=${BRIDGE_PORT}`, {
-      signal: AbortSignal.timeout(35000),
-    });
+    const res = await fetchWithTimeout(`/discover/bq-projects?XTransformPort=${BRIDGE_PORT}`);
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: 'Bridge request failed' }));

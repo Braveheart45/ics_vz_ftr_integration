@@ -13,7 +13,8 @@ import {
 import { useAppStore } from '@/stores/use-app-store';
 
 // ── SQLForge Logo Mark ────────────────────────────────────────
-// Custom icon: document + SQL lines + spark — conveys AI SQL generation
+// BigQuery-inspired magnifying glass over database cylinder
+// with AI sparkle neural nodes — orange color scheme
 function SqlForgeLogo({ className }: { className?: string }) {
   return (
     <svg
@@ -22,30 +23,49 @@ function SqlForgeLogo({ className }: { className?: string }) {
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
     >
-      {/* Document body */}
+      {/* Database cylinder body */}
+      <ellipse cx="14" cy="9" rx="8" ry="3" fill="white" fillOpacity="0.95" />
+      <rect x="6" y="9" width="16" height="16" fill="white" fillOpacity="0.9" />
+      <ellipse cx="14" cy="25" rx="8" ry="3" fill="white" fillOpacity="0.85" />
+
+      {/* Cylinder side edges */}
+      <line x1="6" y1="9" x2="6" y2="25" stroke="white" strokeWidth="0.5" strokeOpacity="0.6" />
+      <line x1="22" y1="9" x2="22" y2="25" stroke="white" strokeWidth="0.5" strokeOpacity="0.6" />
+
+      {/* Top ellipse stroke */}
+      <ellipse cx="14" cy="9" rx="8" ry="3" stroke="white" strokeWidth="0.75" fill="none" strokeOpacity="0.5" />
+
+      {/* SQL code lines on database */}
+      <rect x="9" y="13" width="10" height="1.5" rx="0.75" fill="#F97316" />
+      <rect x="9" y="16.5" width="6" height="1.5" rx="0.75" fill="#F97316" fillOpacity="0.7" />
+      <rect x="9" y="20" width="8" height="1.5" rx="0.75" fill="#F97316" fillOpacity="0.5" />
+
+      {/* Magnifying glass */}
+      <circle cx="21" cy="19" r="5.5" stroke="white" strokeWidth="1.8" fill="white" fillOpacity="0.15" />
+      <line x1="25" y1="23" x2="30" y2="28" stroke="white" strokeWidth="2.2" strokeLinecap="round" />
+
+      {/* AI sparkle — top right (large) */}
       <path
-        d="M7 6C7 4.89543 7.89543 4 9 4H21L27 10V30C27 31.1046 26.1046 32 25 32H9C7.89543 32 7 31.1046 7 30V6Z"
-        fill="white"
-        fillOpacity="0.92"
-      />
-      {/* Page fold */}
-      <path
-        d="M21 4V8C21 9.10457 21.8954 10 23 10H27L21 4Z"
-        fill="white"
-        fillOpacity="0.6"
-      />
-      {/* SQL keyword lines */}
-      <rect x="11" y="14" width="10" height="2" rx="1" fill="#F97316" />
-      <rect x="11" y="19" width="14" height="2" rx="1" fill="#F97316" fillOpacity="0.7" />
-      <rect x="11" y="24" width="8" height="2" rx="1" fill="#F97316" fillOpacity="0.5" />
-      {/* Spark */}
-      <path
-        d="M30 4L31.5 7.5L35 9L31.5 10.5L30 14L28.5 10.5L25 9L28.5 7.5L30 4Z"
+        d="M31 5L32 7.5L34.5 8.5L32 9.5L31 12L30 9.5L27.5 8.5L30 7.5L31 5Z"
         fill="#F97316"
+      />
+      {/* AI sparkle — small (mid right) */}
+      <path
+        d="M33 15L33.6 16.2L35 16.6L33.6 17L33 18.2L32.4 17L31 16.6L32.4 16.2L33 15Z"
+        fill="#FB923C"
+        fillOpacity="0.85"
+      />
+      {/* AI sparkle — tiny (bottom) */}
+      <path
+        d="M28 30L28.4 30.8L29.2 31L28.4 31.2L28 32L27.6 31.2L26.8 31L27.6 30.8L28 30Z"
+        fill="#FDBA74"
         fillOpacity="0.9"
       />
-      {/* Brackets — code feel */}
-      <path d="M9 14L7 18L9 22" stroke="#4285F4" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+
+      {/* Neural connection dots (AI feel) */}
+      <circle cx="26" cy="4" r="0.8" fill="#F97316" fillOpacity="0.5" />
+      <circle cx="29" cy="2" r="0.6" fill="#FDBA74" fillOpacity="0.4" />
+      <circle cx="24" cy="1.5" r="0.5" fill="#FB923C" fillOpacity="0.3" />
     </svg>
   );
 }
@@ -84,7 +104,7 @@ export default function Home() {
               </span>
             </div>
             <span className="hidden text-[11px] font-medium tracking-[0.01em] text-white/60 sm:block leading-none mt-1">
-              AI-Powered SQL Generation &amp; Conversion
+              AI-Powered BigQuery SQL Generation
             </span>
           </div>
         </div>

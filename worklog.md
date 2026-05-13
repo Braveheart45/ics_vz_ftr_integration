@@ -454,3 +454,22 @@ Stage Summary:
 - ADF parser handles: paragraph, heading, bulletList, orderedList, codeBlock, blockquote, table, panel, media, text marks (bold/italic/code/link/strikethrough/underline)
 - SSE parsing is now DRY — single source of truth in sse-client.ts
 - Routes share bridge-forwarder.ts — no more copy-paste
+
+---
+Task ID: 2
+Agent: Main Architect
+Task: Update logo to BigQuery+AI themed orange, fix remaining re-check issues
+
+Work Log:
+- Generated new BigQuery+AI logo image (public/sqlforge-logo.png) via z-ai image generation
+- Redesigned SVG logo mark: BigQuery database cylinder + magnifying glass + AI sparkle stars + neural dots, all in orange
+- Updated page.tsx subtitle: "AI-Powered BigQuery SQL Generation" (was "AI-Powered SQL Generation & Conversion")
+- Fixed P1 bug: sse.done() now sends { success: true } — was missing, causing built-in agent to never set interactionState to 'sql_generated'
+- Fixed AbortSignal.timeout inconsistency in /api/projects/jira and /api/projects/bq routes — replaced with AbortController + setTimeout pattern (consistent with bridge-forwarder.ts)
+- Updated RUNBOOK.md: removed all mock/demo/fallback references, updated file tree to include new shared modules (sse-client.ts, bridge-forwarder.ts, removed mock-data.ts)
+
+Stage Summary:
+- 6 files modified: page.tsx, agent.ts, jira/route.ts, bq/route.ts, RUNBOOK.md
+- 1 image generated: public/sqlforge-logo.png
+- Zero remaining P0/P1 bugs from the code review
+- All lint checks pass, all routes compile clean
