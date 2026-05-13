@@ -73,3 +73,13 @@ export interface DetectedTaskInfo {
   confidence: number;
   reasoning: string;
 }
+
+// Tool execution log (visible in chat)
+export interface ToolCallLog {
+  id: string;
+  tool: string;
+  args: Record<string, unknown>;
+  status: 'running' | 'success' | 'error';
+  summary?: string;
+  timestamp: string;
+}

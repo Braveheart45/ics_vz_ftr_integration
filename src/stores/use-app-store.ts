@@ -8,6 +8,7 @@ import type {
   BqProjectInput,
   SqlOutput,
   DetectedTaskInfo,
+  ToolCallLog,
 } from '@/lib/types';
 
 // ============================================================
@@ -39,10 +40,17 @@ interface AppState {
   // ── Chat / Conversation ─────────────────────────────────
   messages: ChatMessage[];
   isStreaming: boolean;
+  toolLogs: ToolCallLog[];
   addMessage: (message: Omit<ChatMessage, 'id' | 'timestamp'>) => void;
   updateLastAssistantMessage: (content: string) => void;
+  appendToLastAssistantMessage: (content: string) => void;
   setStreaming: (streaming: boolean) => void;
   clearMessages: () => void;
+
+  // ── Tool Call Logs ──────────────────────────────────────
+  addToolLog: (log: Omit<ToolCallLog, 'id' | 'timestamp'>) => void;
+  updateToolLog: (tool: string, status: ToolCallLog['status'], summary: string) => void;
+  clearToolLogs: () => void;
 
   // ── SQL Output ──────────────────────────────────────────
   sqlOutput: SqlOutput | null;
@@ -53,7 +61,12 @@ interface AppState {
 
   // ── Pipeline ────────────────────────────────────────────
   currentStage: WorkflowStage;
-  setStage: (stage: WorkflowStage) => void;
+  stageMessage: string;
+  setStage: (stage: WorkflowStage, message?: string) => void;
+
+  // ── Agent ───────────────────────────────────────────────
+  isAgentRunning: boolean;
+  setAgentRunning: (running: boolean) => void;
 
   // ── Session ─────────────────────────────────────────────
   sessionId: string;
@@ -85,11 +98,15 @@ const initialState = {
 
   messages: [] as ChatMessage[],
   isStreaming: false,
+  toolLogs: [] as ToolCallLog[],
 
   sqlOutput: null as SqlOutput | null,
   isMaximized: false,
 
   currentStage: 'idle' as WorkflowStage,
+  stageMessage: '',
+
+  isAgentRunning: false,
 
   sessionId: generateSessionId(),
 };
@@ -169,12 +186,51 @@ export const useAppStore = create<AppState>((set) => ({
     });
   },
 
+  appendToLastAssistantMessage: (content) => {
+    set((state) => {
+      const lastIdx = state.messages.findLastIndex((m) => m.role === 'assistant');
+      if (lastIdx === -1) return state;
+      const updatedMessages = [...state.messages];
+      updatedMessages[lastIdx] = {
+        ...updatedMessages[lastIdx],
+        content: updatedMessages[lastIdx].content + content,
+      };
+      return { messages: updatedMessages };
+    });
+  },
+
   setStreaming: (streaming) => {
     set({ isStreaming: streaming });
   },
 
   clearMessages: () => {
     set({ messages: [] });
+  },
+
+  // ── Tool Call Logs ──────────────────────────────────────
+
+  addToolLog: (log) => {
+    const newLog: ToolCallLog = {
+      ...log,
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+    };
+    set((state) => ({
+      toolLogs: [...state.toolLogs, newLog],
+    }));
+  },
+
+  updateToolLog: (tool, status, summary) => {
+    set((state) => {
+      const updatedLogs = state.toolLogs.map((log) =>
+        log.tool === tool ? { ...log, status, summary } : log
+      );
+      return { toolLogs: updatedLogs };
+    });
+  },
+
+  clearToolLogs: () => {
+    set({ toolLogs: [] });
   },
 
   // ── SQL Output ──────────────────────────────────────────
@@ -202,8 +258,17 @@ export const useAppStore = create<AppState>((set) => ({
 
   // ── Pipeline ────────────────────────────────────────────
 
-  setStage: (stage) => {
-    set({ currentStage: stage });
+  setStage: (stage, message) => {
+    set({
+      currentStage: stage,
+      stageMessage: message || '',
+    });
+  },
+
+  // ── Agent ───────────────────────────────────────────────
+
+  setAgentRunning: (running) => {
+    set({ isAgentRunning: running });
   },
 
   // ── Session ─────────────────────────────────────────────

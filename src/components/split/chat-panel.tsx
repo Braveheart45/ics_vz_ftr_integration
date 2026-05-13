@@ -5,9 +5,59 @@ import { useAppStore } from '@/stores/use-app-store';
 import { cn } from '@/lib/utils';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
-import { Send, Bot, User, Loader2 } from 'lucide-react';
+import { Send, Bot, User, Loader2, Wrench, CheckCircle2, AlertCircle } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { formatDistanceToNow } from 'date-fns';
+import type { WorkflowStage } from '@/lib/types';
+
+// ── SSE Event Types ─────────────────────────────────────────
+interface SSEStatusEvent {
+  type: 'status';
+  stage: WorkflowStage;
+  message: string;
+}
+
+interface SSEToolCallEvent {
+  type: 'tool_call';
+  tool: string;
+  args: Record<string, unknown>;
+}
+
+interface SSEToolResultEvent {
+  type: 'tool_result';
+  tool: string;
+  success: boolean;
+  summary: string;
+}
+
+interface SSEMessageEvent {
+  type: 'message';
+  content: string;
+}
+
+interface SSESQLEvent {
+  type: 'sql';
+  sql: string;
+  fileName: string;
+}
+
+interface SSEErrorEvent {
+  type: 'error';
+  message: string;
+}
+
+interface SSEDoneEvent {
+  type: 'done';
+}
+
+type SSEEvent =
+  | SSEStatusEvent
+  | SSEToolCallEvent
+  | SSEToolResultEvent
+  | SSEMessageEvent
+  | SSESQLEvent
+  | SSEErrorEvent
+  | SSEDoneEvent;
 
 // ── Streaming dots animation ──────────────────────────────────
 function StreamingDots() {
@@ -17,6 +67,40 @@ function StreamingDots() {
       <span className="size-1.5 animate-bounce rounded-full bg-primary/40 [animation-delay:150ms]" />
       <span className="size-1.5 animate-bounce rounded-full bg-primary/40 [animation-delay:300ms]" />
     </span>
+  );
+}
+
+// ── Tool Call Indicator ──────────────────────────────────────
+function ToolCallItem({ tool, summary, status }: { tool: string; summary?: string; status: 'running' | 'success' | 'error' }) {
+  const toolLabel: Record<string, string> = {
+    fetch_jira_story: 'Fetching Jira Story',
+    list_bq_datasets: 'Listing BQ Datasets',
+    get_table_schema: 'Reading Table Schema',
+    dry_run_sql: 'Validating SQL',
+  };
+
+  return (
+    <div className="flex items-start gap-2 px-4 py-1 animate-fade-in">
+      <div className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-muted/80">
+        {status === 'running' ? (
+          <Wrench className="size-3 text-[#F97316] animate-spin" />
+        ) : status === 'success' ? (
+          <CheckCircle2 className="size-3 text-emerald-600" />
+        ) : (
+          <AlertCircle className="size-3 text-red-500" />
+        )}
+      </div>
+      <div className="flex flex-col gap-0.5 min-w-0">
+        <span className="text-[11px] font-semibold text-foreground/70">
+          {toolLabel[tool] || tool}
+        </span>
+        {summary && (
+          <span className="text-[10px] text-foreground/50 font-medium leading-snug">
+            {summary}
+          </span>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -88,63 +172,174 @@ function MessageBubble({
   );
 }
 
+// ── SSE Stream Processor ─────────────────────────────────────
+function useSSEStream() {
+  const abortRef = useRef<AbortController | null>(null);
+
+  const processStream = useCallback(
+    async (url: string, body: Record<string, unknown>) => {
+      const abort = new AbortController();
+      abortRef.current = abort;
+
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: abort.signal,
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Stream failed' }));
+        throw new Error(err.error || `HTTP ${res.status}`);
+      }
+
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error('No response body');
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      const processEvent = (event: SSEEvent) => {
+        switch (event.type) {
+          case 'status':
+            useAppStore.getState().setStage(event.stage, event.message);
+            break;
+          case 'tool_call':
+            useAppStore.getState().addToolLog({
+              tool: event.tool,
+              args: event.args,
+              status: 'running',
+            });
+            break;
+          case 'tool_result':
+            useAppStore.getState().updateToolLog(event.tool, event.success ? 'success' : 'error', event.summary);
+            break;
+          case 'message':
+            useAppStore.getState().addMessage({ role: 'assistant', content: event.content });
+            useAppStore.getState().setStreaming(false);
+            break;
+          case 'sql':
+            useAppStore.getState().setSqlOutput({
+              sql: event.sql,
+              isEdited: false,
+              fileName: event.fileName,
+              generatedAt: new Date().toISOString(),
+            });
+            break;
+          case 'error':
+            useAppStore.getState().addMessage({
+              role: 'assistant',
+              content: `**Error:** ${event.message}`,
+            });
+            useAppStore.getState().setStreaming(false);
+            useAppStore.getState().setAgentRunning(false);
+            break;
+          case 'done':
+            useAppStore.getState().setStreaming(false);
+            useAppStore.getState().setAgentRunning(false);
+            break;
+        }
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        // Parse SSE events from buffer
+        const lines = buffer.split('\n');
+        buffer = '';
+
+        let currentEvent = '';
+        let currentData = '';
+
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            currentEvent = line.slice(7).trim();
+          } else if (line.startsWith('data: ')) {
+            currentData = line.slice(6).trim();
+          } else if (line === '' && currentEvent && currentData) {
+            try {
+              const parsed = JSON.parse(currentData) as SSEEvent;
+              parsed.type = currentEvent as SSEEvent['type'];
+              processEvent(parsed);
+            } catch {
+              // Skip malformed events
+            }
+            currentEvent = '';
+            currentData = '';
+          } else if (line !== '') {
+            // Incomplete line — put back in buffer
+            buffer = line + '\n';
+            break;
+          }
+        }
+      }
+    },
+    []
+  );
+
+  const abort = useCallback(() => {
+    abortRef.current?.abort();
+    useAppStore.getState().setStreaming(false);
+    useAppStore.getState().setAgentRunning(false);
+  }, []);
+
+  return { processStream, abort };
+}
+
 // ── Chat Panel ────────────────────────────────────────────────
 export function ChatPanel() {
   const messages = useAppStore((s) => s.messages);
   const isStreaming = useAppStore((s) => s.isStreaming);
-  const addMessage = useAppStore((s) => s.addMessage);
+  const toolLogs = useAppStore((s) => s.toolLogs);
+  const isAgentRunning = useAppStore((s) => s.isAgentRunning);
   const sessionId = useAppStore((s) => s.sessionId);
   const taskType = useAppStore((s) => s.taskType);
+  const addMessage = useAppStore((s) => s.addMessage);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const [followUp, setFollowUp] = useState('');
   const [isSending, setIsSending] = useState(false);
+  const { processStream, abort } = useSSEStream();
 
+  // Auto-scroll on new messages or tool updates
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages, isStreaming]);
+  }, [messages, toolLogs, isStreaming]);
 
   const sendFollowUp = useCallback(async () => {
     const trimmed = followUp.trim();
-    if (!trimmed || isSending) return;
+    if (!trimmed || isSending || isAgentRunning) return;
 
     setFollowUp('');
     setIsSending(true);
     addMessage({ role: 'user', content: trimmed });
+    useAppStore.getState().setStreaming(true);
+    useAppStore.getState().setAgentRunning(true);
+    useAppStore.getState().clearToolLogs();
 
-    const chatHistory = messages.map((m) => ({
+    const chatHistory = useAppStore.getState().messages.map((m) => ({
       role: m.role,
       content: m.content,
     }));
-    chatHistory.push({ role: 'user', content: trimmed });
 
     try {
-      const res = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: chatHistory, sessionId, taskType }),
+      await processStream('/api/chat', {
+        messages: chatHistory,
+        sessionId,
+        taskType,
       });
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-        throw new Error(err.error || 'Failed to get AI response');
-      }
-
-      const data = await res.json();
-      addMessage({ role: 'assistant', content: data.content });
     } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : 'Something went wrong';
-      addMessage({
-        role: 'assistant',
-        content: `Error: ${errorMessage}`,
-      });
+      const msg = error instanceof Error ? error.message : 'Failed to get response';
+      addMessage({ role: 'assistant', content: `Error: ${msg}` });
     } finally {
       setIsSending(false);
     }
-  }, [followUp, isSending, messages, sessionId, taskType, addMessage]);
+  }, [followUp, isSending, isAgentRunning, sessionId, taskType, addMessage, processStream]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -157,6 +352,7 @@ export function ChatPanel() {
   );
 
   const hasMessages = messages.length > 0;
+  const hasToolLogs = toolLogs.length > 0;
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
@@ -165,7 +361,7 @@ export function ChatPanel() {
         ref={scrollRef}
         className="flex-1 overflow-y-auto custom-scrollbar"
       >
-        {!hasMessages && (
+        {!hasMessages && !isAgentRunning && (
           <div className="flex h-full flex-col items-center justify-center gap-4 px-6 py-16 text-center">
             {/* Decorative icon */}
             <div className="relative animate-float">
@@ -199,16 +395,32 @@ export function ChatPanel() {
                 />
               </div>
             ))}
-            {isStreaming && (
-              <div className="flex gap-2.5 px-4">
-                <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-secondary text-muted-foreground shadow-[0_1px_2px_0_oklch(0_0_0/0.04)]">
-                  <Bot className="size-3.5" />
-                </div>
-                <div className="rounded-2xl rounded-tl-md bg-secondary/80 px-4 py-3 shadow-[0_1px_2px_0_oklch(0_0_0/0.03)] animate-fade-in">
-                  <StreamingDots />
-                </div>
-              </div>
-            )}
+          </div>
+        )}
+
+        {/* Tool call progress */}
+        {hasToolLogs && (
+          <div className="flex flex-col gap-1.5 pb-2">
+            {toolLogs.map((log) => (
+              <ToolCallItem
+                key={log.id}
+                tool={log.tool}
+                summary={log.summary}
+                status={log.status}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* Streaming indicator */}
+        {(isStreaming || isAgentRunning) && !hasToolLogs && (
+          <div className="flex gap-2.5 px-4 py-2">
+            <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full bg-secondary text-muted-foreground shadow-[0_1px_2px_0_oklch(0_0_0/0.04)]">
+              <Bot className="size-3.5" />
+            </div>
+            <div className="rounded-2xl rounded-tl-md bg-secondary/80 px-4 py-3 shadow-[0_1px_2px_0_oklch(0_0_0/0.03)] animate-fade-in">
+              <StreamingDots />
+            </div>
           </div>
         )}
       </div>
@@ -230,7 +442,7 @@ export function ChatPanel() {
           <Button
             size="icon"
             onClick={sendFollowUp}
-            disabled={!followUp.trim() || isSending}
+            disabled={!followUp.trim() || isSending || isAgentRunning}
             className="shrink-0 size-9 rounded-lg shadow-[0_1px_3px_0_oklch(0.55_0.15_264/0.15)] transition-all duration-200 hover:scale-110 hover:shadow-[0_2px_6px_0_oklch(0.55_0.15_264/0.25)] active:scale-95"
           >
             {isSending ? (

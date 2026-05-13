@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import {
   Copy,
   Check,
@@ -21,6 +21,18 @@ import { toast } from 'sonner';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { cn } from '@/lib/utils';
+import type { WorkflowStage } from '@/lib/types';
+
+// ── SSE Event Types ─────────────────────────────────────────
+interface SSEStatusEvent { type: 'status'; stage: WorkflowStage; message: string }
+interface SSEToolCallEvent { type: 'tool_call'; tool: string; args: Record<string, unknown> }
+interface SSEToolResultEvent { type: 'tool_result'; tool: string; success: boolean; summary: string }
+interface SSEMessageEvent { type: 'message'; content: string }
+interface SSESQLEvent { type: 'sql'; sql: string; fileName: string }
+interface SSEErrorEvent { type: 'error'; message: string }
+interface SSEDoneEvent { type: 'done' }
+
+type SSEEvent = SSEStatusEvent | SSEToolCallEvent | SSEToolResultEvent | SSEMessageEvent | SSESQLEvent | SSEErrorEvent | SSEDoneEvent;
 
 // ============================================================
 // SQL Editor Component
@@ -34,10 +46,12 @@ export function SqlEditor() {
   const messages = useAppStore((s) => s.messages);
   const sessionId = useAppStore((s) => s.sessionId);
   const taskType = useAppStore((s) => s.taskType);
+  const bqProjectInput = useAppStore((s) => s.bqProjectInput);
 
   const [isEditing, setIsEditing] = useState(false);
   const [copied, setCopied] = useState(false);
   const [isRegenerating, setIsRegenerating] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
 
   // ── Copy to Clipboard ────────────────────────────────────
   const handleCopy = useCallback(async () => {
@@ -82,34 +96,117 @@ export function SqlEditor() {
     setIsEditing((prev) => !prev);
   }, []);
 
-  // ── Regenerate ───────────────────────────────────────────
+  // ── Regenerate (SSE streaming) ───────────────────────────
   const handleRegenerate = useCallback(async () => {
     setIsRegenerating(true);
+    useAppStore.getState().setStreaming(true);
+    useAppStore.getState().setAgentRunning(true);
+    useAppStore.getState().clearToolLogs();
+
+    const abort = new AbortController();
+    abortRef.current = abort;
+
+    const chatHistory = messages.map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+
     try {
       const res = await fetch('/api/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages, sessionId, taskType }),
+        body: JSON.stringify({
+          messages: chatHistory,
+          sessionId,
+          taskType,
+          bqProjectId: bqProjectInput.projectId.trim() || undefined,
+        }),
+        signal: abort.signal,
       });
 
-      if (!res.ok) throw new Error('Generation failed');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-      const data = await res.json();
-      if (data.sql) {
-        useAppStore.getState().setSqlOutput({
-          sql: data.sql,
-          isEdited: false,
-          fileName: 'generated_sql.sql',
-          generatedAt: new Date().toISOString(),
-        });
-        toast.success('Regenerated');
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error('No response body');
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = '';
+
+        let currentEvent = '';
+        let currentData = '';
+
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            currentEvent = line.slice(7).trim();
+          } else if (line.startsWith('data: ')) {
+            currentData = line.slice(6).trim();
+          } else if (line === '' && currentEvent && currentData) {
+            try {
+              const parsed = JSON.parse(currentData) as SSEEvent;
+              parsed.type = currentEvent as SSEEvent['type'];
+              handleRegenerateEvent(parsed);
+            } catch { /* skip */ }
+            currentEvent = '';
+            currentData = '';
+          } else if (line !== '') {
+            buffer = line + '\n';
+            break;
+          }
+        }
       }
-    } catch {
+
+      toast.success('Regenerated');
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return;
       toast.error('Failed to regenerate');
     } finally {
       setIsRegenerating(false);
+      useAppStore.getState().setStreaming(false);
+      useAppStore.getState().setAgentRunning(false);
+      abortRef.current = null;
     }
-  }, [messages, sessionId, taskType]);
+  }, [messages, sessionId, taskType, bqProjectInput]);
+
+  function handleRegenerateEvent(event: SSEEvent) {
+    const store = useAppStore.getState();
+    switch (event.type) {
+      case 'status':
+        store.setStage(event.stage, event.message);
+        break;
+      case 'tool_call':
+        store.addToolLog({ tool: event.tool, args: event.args, status: 'running' });
+        break;
+      case 'tool_result':
+        store.updateToolLog(event.tool, event.success ? 'success' : 'error', event.summary);
+        break;
+      case 'message':
+        store.addMessage({ role: 'assistant', content: event.content });
+        break;
+      case 'sql':
+        store.setSqlOutput({
+          sql: event.sql,
+          isEdited: false,
+          fileName: event.fileName,
+          generatedAt: new Date().toISOString(),
+        });
+        break;
+      case 'error':
+        store.addMessage({ role: 'assistant', content: `Error regenerating: ${event.message}` });
+        break;
+      case 'done':
+        store.setStreaming(false);
+        store.setAgentRunning(false);
+        break;
+    }
+  }
 
   // ── Deploy ───────────────────────────────────────────────
   const handleDeploy = useCallback(() => {

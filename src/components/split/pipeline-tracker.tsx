@@ -9,6 +9,7 @@ import {
   ShieldCheck,
   Rocket,
   Check,
+  Loader2,
 } from 'lucide-react';
 import { useAppStore } from '@/stores/use-app-store';
 import type { WorkflowStage } from '@/lib/types';
@@ -41,10 +42,11 @@ const STAGE_ORDER: WorkflowStage[] = STAGES.map((s) => s.id);
 
 export function PipelineTracker() {
   const currentStage = useAppStore((s) => s.currentStage);
+  const stageMessage = useAppStore((s) => s.stageMessage);
   const currentIdx = STAGE_ORDER.indexOf(currentStage);
 
   return (
-    <div className="flex h-full items-center gap-1 px-5">
+    <div className="flex h-full flex-col justify-center gap-2 px-5">
       <div className="flex items-center flex-1 min-w-0 stagger-children">
         {STAGES.map((stage, idx) => {
           const isCompleted = idx < currentIdx;
@@ -67,8 +69,10 @@ export function PipelineTracker() {
                 >
                   {isCompleted ? (
                     <Check className="size-3.5" strokeWidth={2.5} />
+                  ) : isCurrent ? (
+                    <Loader2 className="size-3.5 animate-spin" strokeWidth={2} />
                   ) : (
-                    <Icon className={cn('size-3.5', isCurrent && 'animate-pulse')} strokeWidth={1.75} />
+                    <Icon className="size-3.5" strokeWidth={1.75} />
                   )}
                 </div>
                 <span
@@ -105,6 +109,15 @@ export function PipelineTracker() {
           );
         })}
       </div>
+
+      {/* Stage message */}
+      {stageMessage && currentStage !== 'idle' && (
+        <div className="text-center animate-fade-in">
+          <span className="text-[10px] font-semibold text-[#4285F4]/80 tracking-wide">
+            {stageMessage}
+          </span>
+        </div>
+      )}
     </div>
   );
 }
