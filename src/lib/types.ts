@@ -16,27 +16,13 @@ export type WorkflowStage =
   | 'validation'
   | 'ready';
 
-// Chat message roles
-export type MessageRole = 'user' | 'assistant' | 'system';
-
 // Chat message
 export interface ChatMessage {
   id: string;
-  role: MessageRole;
+  role: 'user' | 'assistant' | 'system';
   content: string;
   timestamp: string;
   isStreaming?: boolean;
-  clarifications?: ClarificationPrompt[];
-}
-
-// Clarification prompt (when agent needs more info)
-export interface ClarificationPrompt {
-  id: string;
-  question: string;
-  options?: { label: string; value: string }[];
-  fieldType: 'select' | 'text' | 'multiselect';
-  placeholder?: string;
-  required: boolean;
 }
 
 // Uploaded file info

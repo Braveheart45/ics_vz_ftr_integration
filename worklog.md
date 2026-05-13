@@ -343,3 +343,87 @@ Stage Summary:
 - Downloadable as CSV with proper escaping
 - Table is collapsible and scrollable in the left panel
 - Lint clean, compiles successfully
+---
+Task ID: 14
+Agent: Main Agent
+Task: Production-grade hardening — hydration fixes, type cleanup, CSS cleanup, deploy UX
+
+Work Log:
+- Fixed hydration mismatch in jira-input.tsx:
+  - Added `mounted` state guard with `useState(false)`
+  - Gate project fetches behind `mounted === true` to avoid SSR/CSR diff
+  - Render Skeleton placeholders for all dropdowns before mount
+  - Added `Skeleton` import from shadcn/ui
+- Fixed hydration mismatch in task-type-selector.tsx:
+  - Initialized indicator style with `opacity: 0` (hidden on SSR = matching CSR initial render)
+  - Single `useEffect` computes position + sets opacity to 1 (no separate mounted state needed)
+  - Removed unused `Skeleton` import
+- Cleaned src/lib/types.ts:
+  - Removed `MessageRole` type (inlined to `ChatMessage.role`)
+  - Removed `ClarificationPrompt` interface (unused)
+  - Removed `clarifications` field from `ChatMessage`
+  - All 14 remaining types verified intact
+- Verified src/stores/use-app-store.ts:
+  - No references to removed types; all imports resolve correctly
+  - `currentStage: 'idle'` initial value preserved
+- Cleaned src/app/globals.css:
+  - Removed `gradient-shift` / `.animate-gradient-shift` (no longer used)
+  - Removed `border-dance` keyframe (unused)
+  - Removed `gentle-bounce` / `.animate-gentle-bounce` (unused)
+  - Removed `connector-flow` / `.animate-connector-flow` (unused)
+  - Removed entire `.sql-code-block` style block (SQL now uses react-syntax-highlighter)
+  - Kept all 10 used animations: float, breathe, shimmer, fade-in-up, fade-in, slide-in-right, slide-in-left, pulse-ring, connector-pulse, stagger-children
+- Simplified src/app/page.tsx header:
+  - Removed `animate-gradient-shift` class from header
+  - Replaced inline `style={{ background: '...' }}` with Tailwind `bg-[#1B2D4F]`
+  - Replaced `text-[#F97316]` with Tailwind `text-orange-400`
+  - Replaced `bg-gradient-to-br from-[#F97316] to-[#EA580C]` with `from-orange-500 to-orange-600`
+  - Replaced oklch shadow with Tailwind `shadow-md`
+  - Reduced subtitle opacity from `text-white/70` to `text-white/60`, weight from semibold to medium
+- Verified src/lib/agent.ts:
+  - All imports resolve correctly (WorkflowStage from types, api-clients functions/types)
+  - No broken references to removed types
+- Fixed Deploy button in sql-editor.tsx:
+  - Changed `toast.success('Deployment initiated')` to `toast.info('Deployment coming soon')`
+  - Button now permanently disabled with tooltip "Deploy (coming soon)"
+- ESLint: zero errors, zero warnings
+- Dev server compiles and serves successfully
+
+Stage Summary:
+- Two hydration mismatches eliminated (jira-input, task-type-selector)
+- Two dead types removed (MessageRole, ClarificationPrompt) with ChatMessage.field cleanup
+- 5 unused CSS keyframe/animation blocks + 1 style block removed (~60 lines)
+- Header simplified from inline styles to Tailwind classes, unnecessary animation removed
+- Deploy button properly marked as coming-soon placeholder
+- Zero lint errors, zero hydration warnings
+---
+Task ID: 15
+Agent: Main Agent
+Task: Remove all dead/unused files and directories from codebase
+
+Work Log:
+- Deleted 13 unused source files:
+  - src/lib/mock-data.ts (1100+ lines of unused mock data)
+  - src/components/dashboard/dashboard-view.tsx (old multi-view architecture)
+  - src/components/pipeline/pipeline-view.tsx (old multi-view architecture)
+  - src/components/jobs/new-job-view.tsx (old multi-view architecture)
+  - src/components/jobs/job-detail-view.tsx (old multi-view architecture)
+  - src/components/activity/activity-view.tsx (old multi-view architecture)
+  - src/components/settings/settings-view.tsx (old multi-view architecture)
+  - src/components/layout/app-sidebar.tsx (old multi-view architecture)
+  - src/components/layout/app-header.tsx (old multi-view architecture)
+  - src/components/split/stm-viewer.tsx (STM logic moved to pipeline-tracker)
+  - src/app/api/route.ts (unused root API)
+  - src/app/api/sql/analyze/route.ts (unused)
+  - src/app/api/sql/validate/route.ts (unused)
+  - src/app/api/jobs/route.ts (unused)
+  - claude-bridge.js (root-level duplicate of mini-services/claude-bridge/index.js)
+- Removed 6 dead directories:
+  - src/components/dashboard/, pipeline/, jobs/, activity/, settings/, layout/
+  - src/app/api/sql/, src/app/api/jobs/
+  - examples/, agent-ctx/, download/
+
+Stage Summary:
+- Reduced source files from ~90 to 73 (clean split-screen architecture only)
+- Eliminated all references to old multi-view architecture
+- No import breakages — verified with `bun run lint`

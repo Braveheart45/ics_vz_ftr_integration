@@ -30,7 +30,7 @@ export function TaskTypeSelector() {
   const taskType = useAppStore((s) => s.taskType);
   const setTaskType = useAppStore((s) => s.setTaskType);
   const containerRef = useRef<HTMLDivElement>(null);
-  const [indicatorStyle, setIndicatorStyle] = useState<React.CSSProperties>({});
+  const [indicatorStyle, setIndicatorStyle] = useState<React.CSSProperties>({ opacity: 0 });
 
   const activeIdx = segments.findIndex((seg) => seg.value === taskType);
 

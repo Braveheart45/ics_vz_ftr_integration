@@ -218,9 +218,9 @@ export function SqlEditor() {
     }
   }
 
-  // ── Deploy ───────────────────────────────────────────────
+  // ── Deploy (placeholder) ─────────────────────────────────
   const handleDeploy = useCallback(() => {
-    toast.success('Deployment initiated');
+    toast.info('Deployment coming soon');
   }, []);
 
   // ── Edit SQL ─────────────────────────────────────────────
@@ -308,7 +308,7 @@ export function SqlEditor() {
           <ToolBtn onClick={handleRegenerate} disabled={!sqlOutput || isRegenerating} title="Regenerate">
             <RefreshCw className={cn('size-3.5', isRegenerating && 'animate-spin')} />
           </ToolBtn>
-          <ToolBtn onClick={handleDeploy} disabled={!sqlOutput} title="Deploy">
+          <ToolBtn onClick={handleDeploy} disabled title="Deploy (coming soon)">
             <Rocket className="size-3.5" />
           </ToolBtn>
         </div>

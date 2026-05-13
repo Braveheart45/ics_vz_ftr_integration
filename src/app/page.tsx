@@ -65,15 +65,13 @@ export default function Home() {
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-background">
       {/* ── Header ─────────────────────────────────────────── */}
-      <header className="relative flex h-[52px] shrink-0 items-center justify-center border-b border-white/[0.06] px-5 shadow-[0_1px_4px_0_oklch(0_0_0/0.15)] animate-gradient-shift"
-        style={{ background: 'linear-gradient(135deg, #1B2D4F 0%, #1E3A5F 25%, #1B2D4F 50%, #243B5F 75%, #1B2D4F 100%)' }}
-      >
+      <header className="relative flex h-[52px] shrink-0 items-center justify-center border-b border-white/[0.06] px-5 shadow-[0_1px_4px_0_oklch(0_0_0/0.15)] bg-[#1B2D4F]">
         {/* Subtle accent line at bottom */}
         <div className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-[#F97316]/40 to-transparent" />
 
         {/* Center: Branding — main focus */}
         <div className="flex items-center gap-3.5">
-          <div className="relative flex size-10 items-center justify-center rounded-xl bg-gradient-to-br from-[#F97316] to-[#EA580C] shadow-[0_2px_8px_0_oklch(0.65_0.22_45/0.45)] transition-transform duration-200 hover:scale-110 active:scale-95">
+          <div className="relative flex size-10 items-center justify-center rounded-xl bg-gradient-to-br from-orange-500 to-orange-600 shadow-md transition-transform duration-200 hover:scale-110 active:scale-95">
             <SqlForgeLogo className="size-6" />
           </div>
           <div className="flex flex-col items-start">
@@ -81,11 +79,11 @@ export default function Home() {
               <span className="text-[19px] font-bold tracking-[-0.025em] text-white leading-none">
                 SQLForge
               </span>
-              <span className="hidden text-[10px] font-bold uppercase tracking-[0.1em] text-[#F97316] sm:inline">
+              <span className="hidden text-[10px] font-bold uppercase tracking-[0.1em] text-orange-400 sm:inline">
                 Agent
               </span>
             </div>
-            <span className="hidden text-[11px] font-semibold tracking-[0.01em] text-white/70 sm:block leading-none mt-1">
+            <span className="hidden text-[11px] font-medium tracking-[0.01em] text-white/60 sm:block leading-none mt-1">
               AI-Powered SQL Generation &amp; Conversion
             </span>
           </div>

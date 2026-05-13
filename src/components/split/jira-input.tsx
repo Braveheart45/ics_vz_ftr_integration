@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Skeleton } from '@/components/ui/skeleton';
 import {
   Select,
   SelectContent,
@@ -27,6 +28,10 @@ export function JiraInput() {
   const setJiraInput = useAppStore((s) => s.setJiraInput);
   const bqProjectInput = useAppStore((s) => s.bqProjectInput);
   const setBqProjectInput = useAppStore((s) => s.setBqProjectInput);
+
+  // ── Hydration guard ──
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
 
   // ── Jira Projects State ──
   const [jiraProjects, setJiraProjects] = useState<JiraProject[]>([]);
@@ -84,11 +89,34 @@ export function JiraInput() {
     }
   }, []);
 
-  // ── Auto-fetch on mount ──
+  // ── Auto-fetch only after mount (prevents hydration mismatch) ──
   useEffect(() => {
+    if (!mounted) return;
     fetchJiraProjects();
     fetchBqProjects();
-  }, [fetchJiraProjects, fetchBqProjects]);
+  }, [mounted, fetchJiraProjects, fetchBqProjects]);
+
+  // ── Before mount: render skeleton placeholders ──
+  if (!mounted) {
+    return (
+      <div className="flex flex-col gap-3">
+        <div className="grid grid-cols-2 gap-3">
+          <div className="flex flex-col gap-1.5">
+            <Skeleton className="h-3 w-20" />
+            <Skeleton className="h-9 w-full" />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Skeleton className="h-3 w-16" />
+            <Skeleton className="h-9 w-full" />
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <Skeleton className="h-3 w-28" />
+          <Skeleton className="h-9 flex-1" />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-3">
