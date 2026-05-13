@@ -5,7 +5,10 @@ const BRIDGE_PORT = process.env.BRIDGE_PORT || '3001';
 
 export async function GET() {
   if (!USE_BRIDGE) {
-    return NextResponse.json({ projects: [], cached: false, fallback: true });
+    return NextResponse.json(
+      { projects: [], error: 'Claude Bridge is not enabled' },
+      { status: 503 }
+    );
   }
 
   try {

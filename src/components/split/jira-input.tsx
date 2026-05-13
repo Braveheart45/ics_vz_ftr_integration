@@ -11,29 +11,15 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { useAppStore } from '@/stores/use-app-store';
-import { Database, RefreshCw, Loader2, AlertCircle, WifiOff } from 'lucide-react';
+import { Database, RefreshCw, Loader2, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { toast } from 'sonner';
 
 // ── Types ────────────────────────────────────────────────
 interface JiraProject {
   key: string;
   name: string;
 }
-
-// ── Fallback projects (shown when bridge is unavailable) ─
-const FALLBACK_JIRA_PROJECTS: JiraProject[] = [
-  { key: 'ENGCORE', name: 'Engineering Core' },
-  { key: 'DATAPIPE', name: 'Data Pipeline' },
-  { key: 'ANALYTICS', name: 'Analytics Platform' },
-];
-
-const FALLBACK_BQ_PROJECTS: string[] = [
-  'prod-data-warehouse',
-  'analytics-prod',
-  'staging-data-lake',
-];
 
 // ── Component ─────────────────────────────────────────────
 export function JiraInput() {
@@ -55,28 +41,21 @@ export function JiraInput() {
   const bqFetched = useRef(false);
 
   // ── Fetch Jira Projects ──
-  const fetchJiraProjects = useCallback(async (silent = false) => {
-    if (!silent) setJiraLoading(true);
+  const fetchJiraProjects = useCallback(async () => {
+    setJiraLoading(true);
     setJiraError(null);
     try {
       const res = await fetch('/api/projects/jira');
       const data = await res.json();
       if (data.projects && data.projects.length > 0) {
         setJiraProjects(data.projects);
-        setJiraError(null);
-      } else if (data.fallback) {
-        // Bridge not enabled — show fallback
-        setJiraProjects(FALLBACK_JIRA_PROJECTS);
-      } else if (data.error) {
-        setJiraError(data.error);
-        setJiraProjects(FALLBACK_JIRA_PROJECTS);
       } else {
-        // Empty result — could mean no access or MCP not configured
         setJiraProjects([]);
+        if (data.error) setJiraError(data.error);
       }
     } catch {
-      setJiraError('Failed to connect to Claude Bridge');
-      setJiraProjects(FALLBACK_JIRA_PROJECTS);
+      setJiraError('Claude Bridge not reachable');
+      setJiraProjects([]);
     } finally {
       setJiraLoading(false);
       jiraFetched.current = true;
@@ -84,26 +63,21 @@ export function JiraInput() {
   }, []);
 
   // ── Fetch BQ Projects ──
-  const fetchBqProjects = useCallback(async (silent = false) => {
-    if (!silent) setBqLoading(true);
+  const fetchBqProjects = useCallback(async () => {
+    setBqLoading(true);
     setBqError(null);
     try {
       const res = await fetch('/api/projects/bq');
       const data = await res.json();
       if (data.projects && data.projects.length > 0) {
         setBqProjects(data.projects);
-        setBqError(null);
-      } else if (data.fallback) {
-        setBqProjects(FALLBACK_BQ_PROJECTS);
-      } else if (data.error) {
-        setBqError(data.error);
-        setBqProjects(FALLBACK_BQ_PROJECTS);
       } else {
         setBqProjects([]);
+        if (data.error) setBqError(data.error);
       }
     } catch {
-      setBqError('Failed to connect to Claude Bridge');
-      setBqProjects(FALLBACK_BQ_PROJECTS);
+      setBqError('Claude Bridge not reachable');
+      setBqProjects([]);
     } finally {
       setBqLoading(false);
       bqFetched.current = true;
@@ -129,7 +103,7 @@ export function JiraInput() {
               variant="ghost"
               size="icon"
               className="size-5 text-muted-foreground/50 hover:text-foreground/70"
-              onClick={() => fetchJiraProjects(false)}
+              onClick={fetchJiraProjects}
               disabled={jiraLoading}
             >
               <RefreshCw className={cn('size-2.5', jiraLoading && 'animate-spin')} />
@@ -147,10 +121,10 @@ export function JiraInput() {
               {jiraLoading ? (
                 <span className="flex items-center gap-2 text-muted-foreground">
                   <Loader2 className="size-3 animate-spin" />
-                  <span>Fetching projects...</span>
+                  <span>Fetching from Jira...</span>
                 </span>
               ) : (
-                <SelectValue placeholder={jiraError ? 'Using default projects' : 'Select project'} />
+                <SelectValue placeholder={jiraError ? 'Connection error' : 'Select project'} />
               )}
             </SelectTrigger>
             <SelectContent className="max-h-[220px]">
@@ -168,7 +142,7 @@ export function JiraInput() {
                   )}
                 </SelectItem>
               ))}
-              {jiraProjects.length === 0 && jiraFetched.current && (
+              {jiraProjects.length === 0 && !jiraError && jiraFetched.current && (
                 <div className="px-2 py-1.5 text-[10px] text-muted-foreground text-center">
                   No Jira projects found
                 </div>
@@ -203,7 +177,7 @@ export function JiraInput() {
             variant="ghost"
             size="icon"
             className="size-5 text-muted-foreground/50 hover:text-foreground/70"
-            onClick={() => fetchBqProjects(false)}
+            onClick={fetchBqProjects}
             disabled={bqLoading}
           >
             <RefreshCw className={cn('size-2.5', bqLoading && 'animate-spin')} />
@@ -221,10 +195,10 @@ export function JiraInput() {
             {bqLoading ? (
               <span className="flex items-center gap-2 text-muted-foreground">
                 <Loader2 className="size-3 animate-spin" />
-                <span>Fetching projects...</span>
+                <span>Fetching from BigQuery...</span>
               </span>
             ) : (
-              <SelectValue placeholder={bqError ? 'Using default projects' : 'Select BigQuery project *'} />
+              <SelectValue placeholder={bqError ? 'Connection error' : 'Select BigQuery project *'} />
             )}
           </SelectTrigger>
           <SelectContent className="max-h-[220px]">
@@ -239,7 +213,7 @@ export function JiraInput() {
                 <span className="font-mono text-xs font-semibold text-foreground">{proj}</span>
               </SelectItem>
             ))}
-            {bqProjects.length === 0 && bqFetched.current && (
+            {bqProjects.length === 0 && !bqError && bqFetched.current && (
               <div className="px-2 py-1.5 text-[10px] text-muted-foreground text-center">
                 No BigQuery projects found
               </div>
