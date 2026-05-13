@@ -2,10 +2,11 @@
 
 import { SqlEditor } from '@/components/split/sql-editor';
 import { PipelineTracker } from '@/components/split/pipeline-tracker';
+import { StmViewer } from '@/components/split/stm-viewer';
 import { useAppStore } from '@/stores/use-app-store';
 
 // ============================================================
-// Left Panel — SQL Editor + Pipeline Tracker
+// Left Panel — SQL Editor + Pipeline Tracker + STM Viewer
 // ============================================================
 
 export function LeftPanel() {
@@ -21,12 +22,18 @@ export function LeftPanel() {
         <SqlEditor />
       </div>
 
-      {/* Pipeline Tracker — hidden when maximized */}
+      {/* Bottom section — hidden when maximized */}
       {!isMaximized && (
-        <div className="shrink-0 border-t border-border/40 bg-muted/20">
-          <div className="h-[88px] overflow-hidden">
-            <PipelineTracker />
+        <div className="shrink-0 flex flex-col">
+          {/* Pipeline Tracker */}
+          <div className="border-t border-border/40 bg-muted/20">
+            <div className="h-[88px] overflow-hidden">
+              <PipelineTracker />
+            </div>
           </div>
+
+          {/* STM Viewer with Download button */}
+          <StmViewer />
         </div>
       )}
     </div>

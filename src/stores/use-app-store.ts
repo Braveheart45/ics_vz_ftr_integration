@@ -11,6 +11,7 @@ import type {
   ToolCallLog,
   ClarificationRequest,
   AgentInteractionState,
+  StmArtifact,
 } from '@/lib/types';
 
 // ============================================================
@@ -74,6 +75,10 @@ interface AppState {
   setInteractionState: (state: AgentInteractionState) => void;
   setPendingClarification: (clarification: ClarificationRequest | null) => void;
 
+  // ── STM Artifact ──────────────────────────────────────
+  stmArtifact: StmArtifact | null;
+  setStmArtifact: (artifact: StmArtifact | null) => void;
+
   // ── Session ─────────────────────────────────────────────
   sessionId: string;
   resetSession: () => void;
@@ -115,6 +120,7 @@ const initialState = {
   isAgentRunning: false,
   interactionState: 'idle' as AgentInteractionState,
   pendingClarification: null as ClarificationRequest | null,
+  stmArtifact: null as StmArtifact | null,
 
   sessionId: generateSessionId(),
 };
@@ -292,6 +298,12 @@ export const useAppStore = create<AppState>((set) => ({
       interactionState: clarification ? 'awaiting_clarification' : 'idle',
       isAgentRunning: false,
     });
+  },
+
+  // ── STM Artifact ──────────────────────────────────────
+
+  setStmArtifact: (artifact) => {
+    set({ stmArtifact: artifact });
   },
 
   // ── Session ─────────────────────────────────────────────

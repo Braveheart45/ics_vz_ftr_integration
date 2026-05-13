@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Send, Bot, User, Loader2, Wrench, CheckCircle2, AlertCircle, MessageCircleQuestion } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { formatDistanceToNow } from 'date-fns';
-import type { WorkflowStage } from '@/lib/types';
+import type { WorkflowStage, StmRow } from '@/lib/types';
 
 // ── SSE Event Types ─────────────────────────────────────────
 interface SSEStatusEvent {
@@ -57,6 +57,11 @@ interface SSEClarificationEvent {
   needsInput: boolean;
 }
 
+interface SSESStmEvent {
+  type: 'stm';
+  artifact: { rows: StmRow[]; title: string; description: string; source: string; jiraRef?: string; bqProject: string; generatedAt: string; version: number };
+}
+
 type SSEEvent =
   | SSEStatusEvent
   | SSEToolCallEvent
@@ -65,7 +70,8 @@ type SSEEvent =
   | SSESQLEvent
   | SSEErrorEvent
   | SSEDoneEvent
-  | SSEClarificationEvent;
+  | SSEClarificationEvent
+  | SSESStmEvent;
 
 // ── Streaming dots animation ──────────────────────────────────
 function StreamingDots() {
@@ -248,6 +254,9 @@ function useSSEStream() {
               message: event.message,
               needsInput: event.needsInput,
             });
+            break;
+          case 'stm':
+            useAppStore.getState().setStmArtifact(event.artifact);
             break;
           case 'done':
             useAppStore.getState().setStreaming(false);

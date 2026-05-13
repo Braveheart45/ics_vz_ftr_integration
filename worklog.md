@@ -310,3 +310,36 @@ Stage Summary:
 - Comprehensive runbook covering architecture, setup, troubleshooting, security
 - Bridge runs as independent mini-service on port 3001
 - Conversation resumption via Claude's --resume flag
+---
+Task ID: 13
+Agent: Main Agent
+Task: Add Source-to-Target Mapping (STM) artifact generation and download
+
+Work Log:
+- Added StmRow and StmArtifact types to src/lib/types.ts
+- Added stmArtifact state and setStmArtifact action to Zustand store
+- Created src/components/split/stm-viewer.tsx:
+  - Collapsible table view with 9 columns (Source Field/Table/Type, Target Column/Table/Type, Transformation, Business Rule, Notes)
+  - "Download updated STM" button with CSV export
+  - Expand/collapse for large tables (shows 3 rows, expand for all)
+  - Eye/EyeOff toggle to collapse to minimal bar
+  - Green color scheme for STM-related UI elements
+  - Empty state shows "Generated after SQL" hint
+- Updated src/components/split/left-panel.tsx to include StmViewer below PipelineTracker
+- Updated SSE handlers in chat-panel.tsx, input-section.tsx, sql-editor.tsx to handle 'stm' event
+- Updated mini-services/claude-bridge/index.js:
+  - Added STM extraction from ```stm code blocks
+  - Added extractStm() function with request context
+  - Updated prompt builder to instruct Claude to include STM JSON
+  - Added 'stm' SSE event emission after SQL generation
+- Updated src/lib/agent.ts:
+  - Added STM instructions to system prompt
+  - Added extractStmBlock() function
+  - Added Phase 6b to emit STM artifact after SQL generation
+
+Stage Summary:
+- STM artifact is auto-generated after every SQL generation workflow
+- Works with all input types: Jira stories, file uploads, text descriptions, legacy SQL conversion
+- Downloadable as CSV with proper escaping
+- Table is collapsible and scrollable in the left panel
+- Lint clean, compiles successfully

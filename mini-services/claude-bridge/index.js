@@ -169,7 +169,12 @@ function buildPrompt(request) {
 4. Always include the SQL in a \`\`\`sql code block.
 5. Briefly explain your design decisions and any assumptions.
 6. If converting legacy SQL, show the original and then the converted version.
-7. End your response with: [SQL_READY] if SQL was generated, or [CLARIFY] if you need more information.`);
+7. End your response with: [SQL_READY] if SQL was generated, or [CLARIFY] if you need more information.
+8. IMPORTANT: After generating SQL, also produce a Source-to-Target Mapping (STM) artifact. Include it in a \`\`\`stm code block with this exact JSON format:
+\`\`\`stm
+{"title":"STM Title","description":"Brief description","rows":[{"sourceField":"field_name","sourceTable":"table_name","sourceType":"data_type","targetColumn":"column_name","targetTable":"table_name","targetType":"data_type","transformation":"TRANSFORM","businessRule":"RULE","notes":"NOTE"}]}
+\`\`\`
+Include every source field mapped to its target column, with the transformation logic and business rule for each mapping.`);
 
   return parts.join('\n\n---\n\n');
 }
@@ -179,6 +184,47 @@ function buildPrompt(request) {
 function extractSql(content) {
   const match = content.match(/```sql\s*\n([\s\S]*?)```/i);
   return match ? match[1].trim() : null;
+}
+
+// ── STM Extraction ────────────────────────────────────────────
+
+function extractStm(content, request) {
+  const match = content.match(/```stm\s*\n([\s\S]*?)```/i);
+  if (!match) return null;
+
+  try {
+    const parsed = JSON.parse(match[1].trim());
+    if (!parsed.rows || !Array.isArray(parsed.rows)) return null;
+
+    // Determine source type from request
+    let source = 'text';
+    if (request.jiraInput?.project && request.jiraInput?.storyNumber) source = 'jira';
+    else if (request.taskType === 'legacy_sql_conversion') source = 'legacy_sql';
+
+    return {
+      rows: parsed.rows.map(r => ({
+        sourceField: String(r.sourceField || ''),
+        sourceTable: String(r.sourceTable || ''),
+        sourceType: String(r.sourceType || ''),
+        targetColumn: String(r.targetColumn || ''),
+        targetTable: String(r.targetTable || ''),
+        targetType: String(r.targetType || ''),
+        transformation: String(r.transformation || ''),
+        businessRule: String(r.businessRule || ''),
+        notes: String(r.notes || ''),
+      })),
+      title: String(parsed.title || 'Source-to-Target Mapping'),
+      description: String(parsed.description || 'Auto-generated STM artifact'),
+      source,
+      jiraRef: source === 'jira' ? `${request.jiraInput.project}-${request.jiraInput.storyNumber}` : undefined,
+      bqProject: String(request.bqProjectId || ''),
+      generatedAt: new Date().toISOString(),
+      version: 1,
+    };
+  } catch (err) {
+    console.error(`  [stm] Failed to parse STM JSON: ${err.message}`);
+    return null;
+  }
 }
 
 // ── Clarification Detection ───────────────────────────────────
@@ -217,7 +263,7 @@ function mapToolToStage(toolName) {
 
 // ── Claude CLI Spawner ────────────────────────────────────────
 
-async function runClaude(prompt, sessionId, onEvent) {
+async function runClaude(prompt, sessionId, request, onEvent) {
   const claudeBin = findClaude();
   if (!claudeBin) {
     throw new Error(
@@ -327,6 +373,15 @@ async function runClaude(prompt, sessionId, onEvent) {
 
       if (hasSql) {
         onEvent({ type: 'sql', sql: extractSql(accumulatedText), fileName: `generated_sql_${Date.now()}.sql` });
+      }
+
+      // Extract and emit STM artifact
+      if (hasSql) {
+        const stm = extractStm(accumulatedText, request);
+        if (stm && stm.rows.length > 0) {
+          onEvent({ type: 'stm', artifact: stm });
+          console.log(`  [stm] Extracted STM with ${stm.rows.length} rows`);
+        }
       }
 
       if (isClarify && !hasSql) {
@@ -625,13 +680,18 @@ const server = http.createServer(async (req, res) => {
                 sseSend('sql', { ...event, timestamp: Date.now() });
               }
               break;
+            case 'stm':
+              if (event.artifact) {
+                sseSend('stm', { ...event, timestamp: Date.now() });
+              }
+              break;
             case 'done':
               sseSend('done', { ...event, timestamp: Date.now() });
               break;
           }
         };
 
-        const result = await runClaude(prompt, sessionId, eventHandler);
+        const result = await runClaude(prompt, sessionId, request, eventHandler);
 
         // Store successful exchange in session
         const lastUserMsg = messages[messages.length - 1];

@@ -21,7 +21,7 @@ import { toast } from 'sonner';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { cn } from '@/lib/utils';
-import type { WorkflowStage } from '@/lib/types';
+import type { WorkflowStage, StmRow } from '@/lib/types';
 
 // ── SSE Event Types ─────────────────────────────────────────
 interface SSEStatusEvent { type: 'status'; stage: WorkflowStage; message: string }
@@ -32,8 +32,9 @@ interface SSESQLEvent { type: 'sql'; sql: string; fileName: string }
 interface SSEErrorEvent { type: 'error'; message: string }
 interface SSEDoneEvent { type: 'done'; success?: boolean }
 interface SSEClarificationEvent { type: 'clarification'; message: string; needsInput: boolean }
+interface SSESStmEvent { type: 'stm'; artifact: { rows: StmRow[]; title: string; description: string; source: string; jiraRef?: string; bqProject: string; generatedAt: string; version: number } }
 
-type SSEEvent = SSEStatusEvent | SSEToolCallEvent | SSEToolResultEvent | SSEMessageEvent | SSESQLEvent | SSEErrorEvent | SSEDoneEvent | SSEClarificationEvent;
+type SSEEvent = SSEStatusEvent | SSEToolCallEvent | SSEToolResultEvent | SSEMessageEvent | SSESQLEvent | SSEErrorEvent | SSEDoneEvent | SSEClarificationEvent | SSESStmEvent;
 
 // ============================================================
 // SQL Editor Component
@@ -205,6 +206,9 @@ export function SqlEditor() {
         break;
       case 'clarification':
         store.setPendingClarification({ message: event.message, needsInput: event.needsInput });
+        break;
+      case 'stm':
+        store.setStmArtifact(event.artifact);
         break;
       case 'done':
         store.setStreaming(false);

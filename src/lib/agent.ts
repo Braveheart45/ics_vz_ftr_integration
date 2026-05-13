@@ -124,6 +124,12 @@ When generating SQL, wrap it in a fenced code block:
 -- Your SQL here
 \`\`\`
 
+IMPORTANT: Also include a Source-to-Target Mapping (STM) in a fenced code block. Use this exact JSON format:
+\`\`\`stm
+{"title":"STM Title","description":"Brief description","rows":[{"sourceField":"field_name","sourceTable":"table_name","sourceType":"data_type","targetColumn":"column_name","targetTable":"table_name","targetType":"data_type","transformation":"TRANSFORM","businessRule":"RULE","notes":"NOTE"}]}
+\`\`\`
+Map every source field to its target column with transformation logic and business rules.
+
 Include a brief explanation before and after the SQL block describing:
 - What the SQL does
 - Key design decisions
@@ -262,11 +268,56 @@ export async function runAgent(
       sse.sql(sqlBlock, fileName);
     }
 
+    // ── Phase 6b: Extract and emit STM ──────────────────────
+    const stmArtifact = extractStmBlock(content, request);
+    if (stmArtifact) {
+      sse.send('stm', { artifact: stmArtifact, timestamp: Date.now() });
+    }
+
     sse.done();
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'LLM generation failed';
     sse.error(msg);
     sse.status('idle', 'Generation failed');
+  }
+}
+
+// ── STM Extraction ─────────────────────────────────────────
+
+function extractStmBlock(content: string, request: AgentRequest) {
+  const match = content.match(/```stm\s*\n([\s\S]*?)```/i);
+  if (!match) return null;
+
+  try {
+    const parsed = JSON.parse(match[1].trim());
+    if (!parsed.rows || !Array.isArray(parsed.rows) || parsed.rows.length === 0) return null;
+
+    let source: 'jira' | 'file' | 'text' | 'legacy_sql' = 'text';
+    if (request.jiraInput?.project && request.jiraInput?.storyNumber) source = 'jira';
+    else if (request.taskType === 'legacy_sql_conversion') source = 'legacy_sql';
+
+    return {
+      rows: parsed.rows.map((r: Record<string, unknown>) => ({
+        sourceField: String(r.sourceField || ''),
+        sourceTable: String(r.sourceTable || ''),
+        sourceType: String(r.sourceType || ''),
+        targetColumn: String(r.targetColumn || ''),
+        targetTable: String(r.targetTable || ''),
+        targetType: String(r.targetType || ''),
+        transformation: String(r.transformation || ''),
+        businessRule: String(r.businessRule || ''),
+        notes: String(r.notes || ''),
+      })),
+      title: String(parsed.title || 'Source-to-Target Mapping'),
+      description: String(parsed.description || 'Auto-generated STM artifact'),
+      source,
+      jiraRef: source === 'jira' ? `${request.jiraInput!.project}-${request.jiraInput!.storyNumber}` : undefined,
+      bqProject: String(request.bqProjectId || ''),
+      generatedAt: new Date().toISOString(),
+      version: 1,
+    };
+  } catch {
+    return null;
   }
 }
 

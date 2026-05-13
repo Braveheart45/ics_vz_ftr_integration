@@ -98,3 +98,30 @@ export type AgentInteractionState =
   | 'awaiting_clarification'
   | 'sql_generated'
   | 'error';
+
+// ── STM (Source-to-Target Mapping) Artifact ──────────────────
+
+// A single row in the STM table
+export interface StmRow {
+  sourceField: string;
+  sourceTable: string;
+  sourceType: string;
+  targetColumn: string;
+  targetTable: string;
+  targetType: string;
+  transformation: string;
+  businessRule: string;
+  notes: string;
+}
+
+// Complete STM artifact with metadata
+export interface StmArtifact {
+  rows: StmRow[];
+  title: string;
+  description: string;
+  source: 'jira' | 'file' | 'text' | 'legacy_sql';
+  jiraRef?: string;
+  bqProject: string;
+  generatedAt: string;
+  version: number;
+}
