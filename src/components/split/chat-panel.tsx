@@ -8,70 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Send, Bot, User, Loader2, Wrench, CheckCircle2, AlertCircle, MessageCircleQuestion } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { formatDistanceToNow } from 'date-fns';
-import type { WorkflowStage, StmRow } from '@/lib/types';
-
-// ── SSE Event Types ─────────────────────────────────────────
-interface SSEStatusEvent {
-  type: 'status';
-  stage: WorkflowStage;
-  message: string;
-}
-
-interface SSEToolCallEvent {
-  type: 'tool_call';
-  tool: string;
-  args: Record<string, unknown>;
-}
-
-interface SSEToolResultEvent {
-  type: 'tool_result';
-  tool: string;
-  success: boolean;
-  summary: string;
-}
-
-interface SSEMessageEvent {
-  type: 'message';
-  content: string;
-}
-
-interface SSESQLEvent {
-  type: 'sql';
-  sql: string;
-  fileName: string;
-}
-
-interface SSEErrorEvent {
-  type: 'error';
-  message: string;
-}
-
-interface SSEDoneEvent {
-  type: 'done';
-  success?: boolean;
-}
-
-interface SSEClarificationEvent {
-  type: 'clarification';
-  message: string;
-  needsInput: boolean;
-}
-
-interface SSESStmEvent {
-  type: 'stm';
-  artifact: { rows: StmRow[]; title: string; description: string; source: string; jiraRef?: string; bqProject: string; generatedAt: string; version: number };
-}
-
-type SSEEvent =
-  | SSEStatusEvent
-  | SSEToolCallEvent
-  | SSEToolResultEvent
-  | SSEMessageEvent
-  | SSESQLEvent
-  | SSEErrorEvent
-  | SSEDoneEvent
-  | SSEClarificationEvent
-  | SSESStmEvent;
+import { postAndStream, processSSEStream } from '@/lib/sse-client';
 
 // ── Streaming dots animation ──────────────────────────────────
 function StreamingDots() {
@@ -186,136 +123,6 @@ function MessageBubble({
   );
 }
 
-// ── SSE Stream Processor ─────────────────────────────────────
-function useSSEStream() {
-  const abortRef = useRef<AbortController | null>(null);
-
-  const processStream = useCallback(
-    async (url: string, body: Record<string, unknown>) => {
-      const abort = new AbortController();
-      abortRef.current = abort;
-
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: abort.signal,
-      });
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: 'Stream failed' }));
-        throw new Error(err.error || `HTTP ${res.status}`);
-      }
-
-      const reader = res.body?.getReader();
-      if (!reader) throw new Error('No response body');
-
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      const processEvent = (event: SSEEvent) => {
-        switch (event.type) {
-          case 'status':
-            useAppStore.getState().setStage(event.stage, event.message);
-            break;
-          case 'tool_call':
-            useAppStore.getState().addToolLog({
-              tool: event.tool,
-              args: event.args,
-              status: 'running',
-            });
-            break;
-          case 'tool_result':
-            useAppStore.getState().updateToolLog(event.tool, event.success ? 'success' : 'error', event.summary);
-            break;
-          case 'message':
-            useAppStore.getState().addMessage({ role: 'assistant', content: event.content });
-            useAppStore.getState().setStreaming(false);
-            break;
-          case 'sql':
-            useAppStore.getState().setSqlOutput({
-              sql: event.sql,
-              isEdited: false,
-              fileName: event.fileName,
-              generatedAt: new Date().toISOString(),
-            });
-            break;
-          case 'error':
-            useAppStore.getState().addMessage({
-              role: 'assistant',
-              content: `**Error:** ${event.message}`,
-            });
-            useAppStore.getState().setStreaming(false);
-            useAppStore.getState().setAgentRunning(false);
-            useAppStore.getState().setInteractionState('error');
-            break;
-          case 'clarification':
-            useAppStore.getState().setPendingClarification({
-              message: event.message,
-              needsInput: event.needsInput,
-            });
-            break;
-          case 'stm':
-            useAppStore.getState().setStmArtifact(event.artifact);
-            break;
-          case 'done':
-            useAppStore.getState().setStreaming(false);
-            useAppStore.getState().setAgentRunning(false);
-            if (event.success) {
-              useAppStore.getState().setInteractionState('sql_generated');
-            }
-            break;
-        }
-      };
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-
-        // Parse SSE events from buffer
-        const lines = buffer.split('\n');
-        buffer = '';
-
-        let currentEvent = '';
-        let currentData = '';
-
-        for (const line of lines) {
-          if (line.startsWith('event: ')) {
-            currentEvent = line.slice(7).trim();
-          } else if (line.startsWith('data: ')) {
-            currentData = line.slice(6).trim();
-          } else if (line === '' && currentEvent && currentData) {
-            try {
-              const parsed = JSON.parse(currentData) as SSEEvent;
-              parsed.type = currentEvent as SSEEvent['type'];
-              processEvent(parsed);
-            } catch {
-              // Skip malformed events
-            }
-            currentEvent = '';
-            currentData = '';
-          } else if (line !== '') {
-            // Incomplete line — put back in buffer
-            buffer = line + '\n';
-            break;
-          }
-        }
-      }
-    },
-    []
-  );
-
-  const abort = useCallback(() => {
-    abortRef.current?.abort();
-    useAppStore.getState().setStreaming(false);
-    useAppStore.getState().setAgentRunning(false);
-  }, []);
-
-  return { processStream, abort };
-}
-
 // ── Chat Panel ────────────────────────────────────────────────
 export function ChatPanel() {
   const messages = useAppStore((s) => s.messages);
@@ -331,7 +138,7 @@ export function ChatPanel() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [followUp, setFollowUp] = useState('');
   const [isSending, setIsSending] = useState(false);
-  const { processStream, abort } = useSSEStream();
+  const abortRef = useRef<AbortController | null>(null);
 
   // Auto-scroll on new messages or tool updates
   useEffect(() => {
@@ -360,19 +167,26 @@ export function ChatPanel() {
       content: m.content,
     }));
 
+    const abort = new AbortController();
+    abortRef.current = abort;
+
     try {
-      await processStream('/api/chat', {
+      const res = await postAndStream('/api/chat', {
         messages: chatHistory,
         sessionId,
         taskType,
-      });
+      }, abort.signal);
+
+      await processSSEStream(res);
     } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return;
       const msg = error instanceof Error ? error.message : 'Failed to get response';
       addMessage({ role: 'assistant', content: `Error: ${msg}` });
     } finally {
       setIsSending(false);
+      abortRef.current = null;
     }
-  }, [followUp, isSending, isAgentRunning, sessionId, taskType, addMessage, processStream]);
+  }, [followUp, isSending, isAgentRunning, sessionId, taskType, addMessage]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -383,6 +197,12 @@ export function ChatPanel() {
     },
     [sendFollowUp]
   );
+
+  const handleAbort = useCallback(() => {
+    abortRef.current?.abort();
+    useAppStore.getState().setStreaming(false);
+    useAppStore.getState().setAgentRunning(false);
+  }, []);
 
   const isAwaitingClarification = interactionState === 'awaiting_clarification' && pendingClarification;
 
@@ -493,18 +313,29 @@ export function ChatPanel() {
               aria-label="Follow-up message"
             />
           </div>
-          <Button
-            size="icon"
-            onClick={sendFollowUp}
-            disabled={!followUp.trim() || isSending || isAgentRunning}
-            className="shrink-0 size-9 rounded-lg shadow-[0_1px_3px_0_oklch(0.55_0.15_264/0.15)] transition-all duration-200 hover:scale-110 hover:shadow-[0_2px_6px_0_oklch(0.55_0.15_264/0.25)] active:scale-95"
-          >
-            {isSending ? (
-              <Loader2 className="size-3.5 animate-spin" />
-            ) : (
-              <Send className="size-3.5" />
-            )}
-          </Button>
+          {isAgentRunning ? (
+            <Button
+              size="icon"
+              onClick={handleAbort}
+              className="shrink-0 size-9 rounded-lg bg-red-500/10 text-red-500 hover:bg-red-500/20 hover:text-red-600 transition-all duration-200 hover:scale-110 active:scale-95"
+              title="Cancel"
+            >
+              <Loader2 className="size-3.5" />
+            </Button>
+          ) : (
+            <Button
+              size="icon"
+              onClick={sendFollowUp}
+              disabled={!followUp.trim() || isSending}
+              className="shrink-0 size-9 rounded-lg shadow-[0_1px_3px_0_oklch(0.55_0.15_264/0.15)] transition-all duration-200 hover:scale-110 hover:shadow-[0_2px_6px_0_oklch(0.55_0.15_264/0.25)] active:scale-95"
+            >
+              {isSending ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Send className="size-3.5" />
+              )}
+            </Button>
+          )}
         </div>
       </div>
     </div>

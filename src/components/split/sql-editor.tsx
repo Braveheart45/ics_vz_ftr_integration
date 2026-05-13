@@ -21,20 +21,7 @@ import { toast } from 'sonner';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { cn } from '@/lib/utils';
-import type { WorkflowStage, StmRow } from '@/lib/types';
-
-// ── SSE Event Types ─────────────────────────────────────────
-interface SSEStatusEvent { type: 'status'; stage: WorkflowStage; message: string }
-interface SSEToolCallEvent { type: 'tool_call'; tool: string; args: Record<string, unknown> }
-interface SSEToolResultEvent { type: 'tool_result'; tool: string; success: boolean; summary: string }
-interface SSEMessageEvent { type: 'message'; content: string }
-interface SSESQLEvent { type: 'sql'; sql: string; fileName: string }
-interface SSEErrorEvent { type: 'error'; message: string }
-interface SSEDoneEvent { type: 'done'; success?: boolean }
-interface SSEClarificationEvent { type: 'clarification'; message: string; needsInput: boolean }
-interface SSESStmEvent { type: 'stm'; artifact: { rows: StmRow[]; title: string; description: string; source: string; jiraRef?: string; bqProject: string; generatedAt: string; version: number } }
-
-type SSEEvent = SSEStatusEvent | SSEToolCallEvent | SSEToolResultEvent | SSEMessageEvent | SSESQLEvent | SSEErrorEvent | SSEDoneEvent | SSEClarificationEvent | SSESStmEvent;
+import { postAndStream, processSSEStream } from '@/lib/sse-client';
 
 // ============================================================
 // SQL Editor Component
@@ -114,56 +101,14 @@ export function SqlEditor() {
     }));
 
     try {
-      const res = await fetch('/api/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages: chatHistory,
-          sessionId,
-          taskType,
-          bqProjectId: bqProjectInput.projectId.trim() || undefined,
-        }),
-        signal: abort.signal,
-      });
+      const res = await postAndStream('/api/generate', {
+        messages: chatHistory,
+        sessionId,
+        taskType,
+        bqProjectId: bqProjectInput.projectId.trim() || undefined,
+      }, abort.signal);
 
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-      const reader = res.body?.getReader();
-      if (!reader) throw new Error('No response body');
-
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = '';
-
-        let currentEvent = '';
-        let currentData = '';
-
-        for (const line of lines) {
-          if (line.startsWith('event: ')) {
-            currentEvent = line.slice(7).trim();
-          } else if (line.startsWith('data: ')) {
-            currentData = line.slice(6).trim();
-          } else if (line === '' && currentEvent && currentData) {
-            try {
-              const parsed = JSON.parse(currentData) as SSEEvent;
-              parsed.type = currentEvent as SSEEvent['type'];
-              handleRegenerateEvent(parsed);
-            } catch { /* skip */ }
-            currentEvent = '';
-            currentData = '';
-          } else if (line !== '') {
-            buffer = line + '\n';
-            break;
-          }
-        }
-      }
+      await processSSEStream(res);
 
       toast.success('Regenerated');
     } catch (error) {
@@ -176,47 +121,6 @@ export function SqlEditor() {
       abortRef.current = null;
     }
   }, [messages, sessionId, taskType, bqProjectInput]);
-
-  function handleRegenerateEvent(event: SSEEvent) {
-    const store = useAppStore.getState();
-    switch (event.type) {
-      case 'status':
-        store.setStage(event.stage, event.message);
-        break;
-      case 'tool_call':
-        store.addToolLog({ tool: event.tool, args: event.args, status: 'running' });
-        break;
-      case 'tool_result':
-        store.updateToolLog(event.tool, event.success ? 'success' : 'error', event.summary);
-        break;
-      case 'message':
-        store.addMessage({ role: 'assistant', content: event.content });
-        break;
-      case 'sql':
-        store.setSqlOutput({
-          sql: event.sql,
-          isEdited: false,
-          fileName: event.fileName,
-          generatedAt: new Date().toISOString(),
-        });
-        break;
-      case 'error':
-        store.addMessage({ role: 'assistant', content: `Error regenerating: ${event.message}` });
-        store.setInteractionState('error');
-        break;
-      case 'clarification':
-        store.setPendingClarification({ message: event.message, needsInput: event.needsInput });
-        break;
-      case 'stm':
-        store.setStmArtifact(event.artifact);
-        break;
-      case 'done':
-        store.setStreaming(false);
-        store.setAgentRunning(false);
-        if (event.success) store.setInteractionState('sql_generated');
-        break;
-    }
-  }
 
   // ── Deploy (placeholder) ─────────────────────────────────
   const handleDeploy = useCallback(() => {

@@ -8,7 +8,6 @@ import type { WorkflowStage } from '@/lib/types';
 import {
   getJiraClient,
   getBQClient,
-  getGitHubClient,
   type JiraStory,
   type TableSchema,
 } from './api-clients';
@@ -88,6 +87,17 @@ function extractSqlBlock(content: string): string | null {
   return match ? match[1].trim() : null;
 }
 
+// ── STM version tracker (in-memory per session) ────────────
+
+const stmVersions = new Map<string, number>();
+
+function getNextStmVersion(sessionId: string): number {
+  const current = stmVersions.get(sessionId) || 0;
+  const next = current + 1;
+  stmVersions.set(sessionId, next);
+  return next;
+}
+
 // ── System Prompt ──────────────────────────────────────────
 
 function buildSystemPrompt(taskType: string): string {
@@ -137,13 +147,65 @@ Include a brief explanation before and after the SQL block describing:
 - Performance considerations`;
 }
 
+// ── Table Inference (dynamic, no hardcoded tables) ─────────
+
+function inferTablesToFetch(context: string): Array<{ datasetId: string; tableId: string }> {
+  const result: Array<{ datasetId: string; tableId: string }> = [];
+
+  // Pattern 1: `dataset.table` or dataset.table (backtick-quoted or bare)
+  const tableRefPattern = /`?([a-zA-Z_][\w]*)`?\.`?([a-zA-Z_][\w]*)`?/g;
+  const seen = new Set<string>();
+  let match: RegExpExecArray | null;
+
+  while ((match = tableRefPattern.exec(context)) !== null) {
+    // Skip common SQL keywords that might match the pattern
+    const sqlKeywords = new Set([
+      'STRING', 'INT64', 'FLOAT64', 'BOOLEAN', 'TIMESTAMP', 'DATE', 'DATETIME',
+      'ARRAY', 'STRUCT', 'BYTES', 'NUMERIC', 'BIGNUMERIC', 'GEOGRAPHY',
+      'COALESCE', 'IFNULL', 'NULLIF', 'SAFE_DIVIDE',
+    ]);
+    const datasetId = match[1].toLowerCase();
+    const tableId = match[2].toLowerCase();
+    if (sqlKeywords.has(match[1].toUpperCase()) || sqlKeywords.has(match[2].toUpperCase())) continue;
+
+    const key = `${datasetId}.${tableId}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push({ datasetId, tableId });
+    }
+  }
+
+  return result;
+}
+
+// ── Retry utility ──────────────────────────────────────────
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  maxAttempts: number = 2,
+  delayMs: number = 1000,
+): Promise<T> {
+  let lastError: Error | undefined;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      if (attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, delayMs * attempt));
+      }
+    }
+  }
+  throw lastError;
+}
+
 // ── Main Agent Loop ────────────────────────────────────────
 
 export async function runAgent(
   request: AgentRequest,
   sse: SSEStream,
 ): Promise<void> {
-  const { messages, taskType, jiraInput, bqProjectId, contextText } = request;
+  const { messages, taskType, jiraInput, bqProjectId, contextText, sessionId } = request;
 
   // ── Phase 1: Intake ───────────────────────────────────────
   sse.status('intake', 'Processing your request...');
@@ -156,14 +218,17 @@ export async function runAgent(
     sse.toolCall('fetch_jira_story', { project: jiraInput.project, storyNumber: jiraInput.storyNumber });
 
     try {
-      const jira = getJiraClient();
-      const story = await jira.fetchStory(jiraInput.project, jiraInput.storyNumber);
+      const story = await withRetry(() => {
+        const jira = getJiraClient();
+        return jira.fetchStory(jiraInput!.project, jiraInput!.storyNumber);
+      });
       contextParts.push(formatJiraContext(story));
       sse.toolResult('fetch_jira_story', true, `Fetched: ${story.key} — ${story.summary}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to fetch Jira story';
       sse.toolResult('fetch_jira_story', false, msg);
-      contextParts.push(`[Jira fetch failed: ${msg}]`);
+      // Surface error to user instead of silently continuing
+      contextParts.push(`**[Jira fetch failed after retries: ${msg}]**\n\n⚠️ The LLM will generate SQL based on the context you provided without Jira story details. Verify the output carefully.`);
     }
   }
 
@@ -173,17 +238,18 @@ export async function runAgent(
 
     try {
       const bq = getBQClient();
-      const datasets = await bq.getDatasets();
+      const datasets = await withRetry(() => bq.getDatasets());
       sse.toolCall('list_bq_datasets', { projectId: bqProjectId });
 
-      // Fetch schemas for common tables mentioned in context
-      const tablesToFetch = inferTablesToFetch(contextText.join('\n') + ' ' + (contextText || ''));
+      // Build context from Jira description + user context for table inference
+      const fullContext = contextParts.join('\n') + ' ' + (contextText || '');
+      const tablesToFetch = inferTablesToFetch(fullContext);
       const schemas: TableSchema[] = [];
 
       for (const { datasetId, tableId } of tablesToFetch) {
         sse.toolCall('get_table_schema', { datasetId, tableId });
         try {
-          const schema = await bq.getTableSchema(datasetId, tableId);
+          const schema = await withRetry(() => bq.getTableSchema(datasetId, tableId));
           schemas.push(schema);
           sse.toolResult('get_table_schema', true, `${datasetId}.${tableId} — ${schema.columns.length} columns`);
         } catch {
@@ -194,16 +260,16 @@ export async function runAgent(
       if (schemas.length > 0) {
         contextParts.push(formatSchemaContext(schemas));
       } else {
-        // Provide available datasets info
+        // No table schemas resolved — inform the LLM of available datasets
         contextParts.push(
-          `## BigQuery Project: ${bqProjectId}\nAvailable datasets: ${datasets.join(', ')}\n\nNote: Could not fetch specific table schemas. Please generate SQL based on the Jira requirements and standard BigQuery conventions.`
+          `## BigQuery Project: ${bqProjectId}\nAvailable datasets: ${datasets.join(', ')}\n\n⚠️ Could not resolve specific table schemas from context. Please generate SQL based on the Jira requirements and standard BigQuery conventions. Ask the user for clarification if the table structure is ambiguous.`
         );
       }
       sse.toolResult('list_bq_datasets', true, `Found ${datasets.length} datasets: ${datasets.join(', ')}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to connect to BigQuery';
       sse.toolResult('list_bq_datasets', false, msg);
-      contextParts.push(`[BigQuery schema resolution failed: ${msg}]`);
+      contextParts.push(`**[BigQuery schema resolution failed after retries: ${msg}]**\n\n⚠️ The LLM will generate SQL based on available context without schema validation. Verify table/column names against your BigQuery project.`);
     }
   }
 
@@ -264,12 +330,16 @@ export async function runAgent(
     sse.message(content);
 
     if (sqlBlock) {
-      const fileName = `generated_sql_${Date.now()}.sql`;
+      // Include Jira ticket key in filename for traceability
+      const ticketKey = jiraInput?.project && jiraInput?.storyNumber
+        ? `${jiraInput.project}-${jiraInput.storyNumber}`
+        : 'standalone';
+      const fileName = `sqlforge_${ticketKey}_${Date.now()}.sql`;
       sse.sql(sqlBlock, fileName);
     }
 
     // ── Phase 6b: Extract and emit STM ──────────────────────
-    const stmArtifact = extractStmBlock(content, request);
+    const stmArtifact = extractStmBlock(content, request, sessionId);
     if (stmArtifact) {
       sse.send('stm', { artifact: stmArtifact, timestamp: Date.now() });
     }
@@ -282,10 +352,17 @@ export async function runAgent(
   }
 }
 
-// ── STM Extraction ─────────────────────────────────────────
+// ── STM Extraction (with JSON fallback) ────────────────────
 
-function extractStmBlock(content: string, request: AgentRequest) {
-  const match = content.match(/```stm\s*\n([\s\S]*?)```/i);
+function extractStmBlock(content: string, request: AgentRequest, sessionId: string) {
+  // Strategy 1: Fenced code block ```stm ... ```
+  const fencedMatch = content.match(/```(?:stm|STM)\s*\n([\s\S]*?)```/);
+  // Strategy 2: JSON object with "rows" key (fallback for LLMs that don't use fences)
+  const jsonMatch = !fencedMatch
+    ? content.match(/\{[\s\S]*?"title"[\s\S]*?"rows"\s*:\s*\[[\s\S]*?\][\s\S]*?\}/)
+    : null;
+
+  const match = fencedMatch || jsonMatch;
   if (!match) return null;
 
   try {
@@ -311,10 +388,12 @@ function extractStmBlock(content: string, request: AgentRequest) {
       title: String(parsed.title || 'Source-to-Target Mapping'),
       description: String(parsed.description || 'Auto-generated STM artifact'),
       source,
-      jiraRef: source === 'jira' ? `${request.jiraInput!.project}-${request.jiraInput!.storyNumber}` : undefined,
+      jiraRef: source === 'jira'
+        ? `${request.jiraInput!.project}-${request.jiraInput!.storyNumber}`
+        : undefined,
       bqProject: String(request.bqProjectId || ''),
       generatedAt: new Date().toISOString(),
-      version: 1,
+      version: getNextStmVersion(sessionId),
     };
   } catch {
     return null;
@@ -367,34 +446,4 @@ function formatSchemaContext(schemas: TableSchema[]): string {
       )
       .join('\n\n')
   );
-}
-
-function inferTablesToFetch(context: string): Array<{ datasetId: string; tableId: string }> {
-  // Common tables referenced in SQLForge context
-  const knownTables: Array<{ datasetId: string; tableId: string }> = [
-    { datasetId: 'raw_data', tableId: 'orders' },
-    { datasetId: 'staging', tableId: 'product_catalog' },
-    { datasetId: 'staging', tableId: 'customers' },
-    { datasetId: 'analytics', tableId: 'sales_daily' },
-  ];
-
-  // Also try to extract table references from context (e.g., `raw_data.orders`)
-  const tableRefPattern = /`?([a-z_]+)\.([a-z_]+)`?/gi;
-  let match: RegExpExecArray | null;
-  const extracted: Set<string> = new Set();
-
-  while ((match = tableRefPattern.exec(context)) !== null) {
-    extracted.add(`${match[1]}.${match[2]}`);
-  }
-
-  // Merge: always include known tables + any explicitly referenced
-  const result = [...knownTables];
-  for (const ref of extracted) {
-    const [datasetId, tableId] = ref.split('.');
-    if (!result.some((t) => t.datasetId === datasetId && t.tableId === tableId)) {
-      result.push({ datasetId, tableId });
-    }
-  }
-
-  return result;
 }

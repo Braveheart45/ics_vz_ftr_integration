@@ -9,120 +9,7 @@ import { ContextInput } from './context-input';
 import { Sparkles, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
-import type { WorkflowStage, StmRow } from '@/lib/types';
-
-// ── SSE Event Types ─────────────────────────────────────────
-interface SSEStatusEvent { type: 'status'; stage: WorkflowStage; message: string }
-interface SSEToolCallEvent { type: 'tool_call'; tool: string; args: Record<string, unknown> }
-interface SSEToolResultEvent { type: 'tool_result'; tool: string; success: boolean; summary: string }
-interface SSEMessageEvent { type: 'message'; content: string }
-interface SSESQLEvent { type: 'sql'; sql: string; fileName: string }
-interface SSEErrorEvent { type: 'error'; message: string }
-interface SSEDoneEvent { type: 'done'; success?: boolean }
-interface SSEClarificationEvent { type: 'clarification'; message: string; needsInput: boolean }
-interface SSESStmEvent { type: 'stm'; artifact: { rows: StmRow[]; title: string; description: string; source: string; jiraRef?: string; bqProject: string; generatedAt: string; version: number } }
-
-type SSEEvent = SSEStatusEvent | SSEToolCallEvent | SSEToolResultEvent | SSEMessageEvent | SSESQLEvent | SSEErrorEvent | SSEDoneEvent | SSEClarificationEvent | SSESStmEvent;
-
-// ── SSE Stream Helper ───────────────────────────────────────
-async function processSSEStream(
-  url: string,
-  body: Record<string, unknown>,
-  signal: AbortSignal,
-) {
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal,
-  });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: 'Stream failed' }));
-    throw new Error(err.error || `HTTP ${res.status}`);
-  }
-
-  const reader = res.body?.getReader();
-  if (!reader) throw new Error('No response body');
-
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = '';
-
-    let currentEvent = '';
-    let currentData = '';
-
-    for (const line of lines) {
-      if (line.startsWith('event: ')) {
-        currentEvent = line.slice(7).trim();
-      } else if (line.startsWith('data: ')) {
-        currentData = line.slice(6).trim();
-      } else if (line === '' && currentEvent && currentData) {
-        try {
-          const parsed = JSON.parse(currentData) as SSEEvent;
-          parsed.type = currentEvent as SSEEvent['type'];
-          handleSSEEvent(parsed);
-        } catch { /* skip */ }
-        currentEvent = '';
-        currentData = '';
-      } else if (line !== '') {
-        buffer = line + '\n';
-        break;
-      }
-    }
-  }
-}
-
-function handleSSEEvent(event: SSEEvent) {
-  const store = useAppStore.getState();
-  switch (event.type) {
-    case 'status':
-      store.setStage(event.stage, event.message);
-      break;
-    case 'tool_call':
-      store.addToolLog({ tool: event.tool, args: event.args, status: 'running' });
-      break;
-    case 'tool_result':
-      store.updateToolLog(event.tool, event.success ? 'success' : 'error', event.summary);
-      break;
-    case 'message':
-      store.addMessage({ role: 'assistant', content: event.content });
-      store.setStreaming(false);
-      break;
-    case 'sql':
-      store.setSqlOutput({
-        sql: event.sql,
-        isEdited: false,
-        fileName: event.fileName,
-        generatedAt: new Date().toISOString(),
-      });
-      break;
-    case 'error':
-      store.addMessage({ role: 'assistant', content: `**Error:** ${event.message}` });
-      store.setStreaming(false);
-      store.setAgentRunning(false);
-      store.setInteractionState('error');
-      break;
-    case 'clarification':
-      store.setPendingClarification({ message: event.message, needsInput: event.needsInput });
-      break;
-    case 'stm':
-      store.setStmArtifact(event.artifact);
-      break;
-    case 'done':
-      store.setStreaming(false);
-      store.setAgentRunning(false);
-      if (event.success) store.setInteractionState('sql_generated');
-      break;
-  }
-}
+import { postAndStream, processSSEStream } from '@/lib/sse-client';
 
 // ── Component ─────────────────────────────────────────────────
 export function InputSection() {
@@ -195,7 +82,7 @@ export function InputSection() {
     abortRef.current = abort;
 
     try {
-      await processSSEStream('/api/chat', {
+      const res = await postAndStream('/api/chat', {
         messages: chatHistory,
         sessionId,
         taskType,
@@ -203,6 +90,8 @@ export function InputSection() {
         bqProjectId: bqProjectInput.projectId.trim() || undefined,
         contextText: contextText.trim() || undefined,
       }, abort.signal);
+
+      await processSSEStream(res);
 
       toast.success('SQL generation complete');
     } catch (error) {

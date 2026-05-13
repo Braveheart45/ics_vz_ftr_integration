@@ -1,8 +1,7 @@
 // ============================================================
 // SQLForge — External API Clients
 // Jira · BigQuery · GitHub
-// All clients fall back to realistic mock data when
-// credentials are not configured.
+// All clients require real credentials — no fallback mocks.
 // ============================================================
 
 // ── Types ──────────────────────────────────────────────────
@@ -45,7 +44,7 @@ export interface QueryResult {
 }
 
 // ============================================================
-// Jira Client
+// Jira Client — Atlassian Document Format (ADF) Parser
 // ============================================================
 
 export class JiraClient {
@@ -65,7 +64,7 @@ export class JiraClient {
 
   async fetchStory(project: string, storyNumber: string): Promise<JiraStory> {
     if (!this.isConfigured) {
-      return this.mockStory(project, storyNumber);
+      throw new Error('Jira is not configured. Set JIRA_BASE_URL, JIRA_USER_EMAIL, and JIRA_API_TOKEN environment variables.');
     }
 
     const issueKey = `${project}-${storyNumber}`;
@@ -80,27 +79,150 @@ export class JiraClient {
     });
 
     if (!res.ok) {
-      throw new Error(`Jira API error ${res.status} for ${issueKey}`);
+      const statusText = res.statusText || 'Unknown error';
+      throw new Error(`Jira API error ${res.status} (${statusText}) for ${issueKey}`);
     }
 
     const data = await res.json();
     return this.parseStory(data);
   }
 
-  // ── Real parser ──────────────────────────────────────────
+  // ── Robust ADF Parser ────────────────────────────────────
+
+  /**
+   * Recursively parses Atlassian Document Format (ADF) into plain text.
+   * Handles: paragraph, heading, bulletList, orderedList, listItem,
+   * text, hardBreak, codeBlock, blockquote, table, panel, etc.
+   */
+  private parseADF(node: Record<string, unknown> | undefined | null, depth: number = 0): string {
+    if (!node) return '';
+    const type = node.type as string | undefined;
+    const content = node.content as Array<Record<string, unknown>> | undefined;
+
+    if (type === 'text') {
+      const text = node.text as string || '';
+      const marks = node.marks as Array<{ type: string }> | undefined;
+      if (marks?.some((m) => m.type === 'code')) return `\`${text}\``;
+      if (marks?.some((m) => m.type === 'bold')) return `**${text}**`;
+      if (marks?.some((m) => m.type === 'italic')) return `*${text}*`;
+      if (marks?.some((m) => m.type === 'strikethrough')) return `~~${text}~~`;
+      if (marks?.some((m) => m.type === 'underline')) return `_${text}_`;
+      if (marks?.some((m) => m.type === 'link')) {
+        const href = marks.find((m) => m.type === 'link')?.attrs?.href as string | undefined;
+        return href ? `[${text}](${href})` : text;
+      }
+      return text;
+    }
+
+    if (type === 'hardBreak') return '\n';
+
+    if (!content || !Array.isArray(content)) {
+      // Leaf nodes without content
+      if (type === 'rule') return '\n---\n';
+      if (type === 'emoji') {
+        const shortName = (node.attrs as Record<string, unknown>)?.shortName as string | undefined;
+        return shortName || '';
+      }
+      return '';
+    }
+
+    // Block-level nodes
+    const indent = '  '.repeat(depth);
+
+    switch (type) {
+      case 'paragraph':
+        return content.map((c) => this.parseADF(c, depth)).join('') + '\n\n';
+      case 'heading':
+        const level = (node.attrs?.level as number) || 1;
+        const headingText = content.map((c) => this.parseADF(c, depth)).join('');
+        return `${'#'.repeat(Math.min(level, 6))} ${headingText}\n\n`;
+      case 'bulletList':
+        return content
+          .map((item) => `${indent}- ${this.parseListItem(item, depth + 1)}`)
+          .join('\n') + '\n\n';
+      case 'orderedList':
+        return content
+          .map((item, i) => `${indent}${i + 1}. ${this.parseListItem(item, depth + 1)}`)
+          .join('\n') + '\n\n';
+      case 'codeBlock':
+        const lang = (node.attrs?.language as string) || '';
+        const code = content.map((c) => this.parseADF(c, depth)).join('');
+        return `\`\`\`${lang}\n${code}\n\`\`\`\n\n`;
+      case 'blockquote':
+        const bqText = content.map((c) => this.parseADF(c, depth + 1)).join('');
+        return bqText.split('\n').map((l) => l ? `> ${l}` : '>').join('\n') + '\n\n';
+      case 'table': {
+        const rows = content.map((row) => {
+          const cells = (row.content as Array<Record<string, unknown>> || [])
+            .map((cell) => (cell.content as Array<Record<string, unknown>> || [])
+              .map((c) => this.parseADF(c, depth).trim())
+              .join(' ')
+              .replace(/\n/g, ' '))
+            .join(' | ');
+          return `| ${cells} |`;
+        });
+        if (rows.length === 0) return '';
+        // Add separator after header row
+        const colCount = ((content[0]?.content as Array<unknown>) || []).length;
+        const separator = `| ${Array(colCount).fill('---').join(' | ')} |`;
+        return [rows[0], separator, ...rows.slice(1)].join('\n') + '\n\n';
+      }
+      case 'panel':
+        const panelType = (node.attrs?.panelType as string) || 'info';
+        const panelContent = content.map((c) => this.parseADF(c, depth)).join('');
+        return `> **[${panelType.toUpperCase()}]** ${panelContent.trim()}\n\n`;
+      case 'media': {
+        const attrs = node.attrs as Record<string, unknown> | undefined;
+        const alt = attrs?.alt as string || 'image';
+        const src = attrs?.url as string || '';
+        return src ? `![${alt}](${src})\n\n` : '';
+      }
+      default:
+        // Unknown block — recurse into children
+        return content.map((c) => this.parseADF(c, depth)).join('');
+    }
+  }
+
+  private parseListItem(item: Record<string, unknown>, depth: number): string {
+    const content = item.content as Array<Record<string, unknown>> | undefined;
+    if (!content) return '';
+    return content.map((c) => this.parseADF(c, depth)).join('').trim();
+  }
+
+  // ── Story Parser ─────────────────────────────────────────
 
   private parseStory(data: Record<string, unknown>): JiraStory {
     const fields = data.fields as Record<string, unknown>;
     const desc = fields.description as Record<string, unknown> | null;
-    const descText = desc
-      ? ((desc.content as Array<Record<string, unknown>>)
-          ?.map((node) =>
-            ((node.content as Array<Record<string, unknown>> | undefined)
-              ?.map((t) => t.text || '')
-              .join('') || (node.type === 'hardBreak' ? '\n' : ''))
-          )
-          .join('') || '')
-      : (fields.description as string) || '';
+
+    // Use the robust ADF parser for Atlassian Document Format
+    let descText = '';
+    if (desc && desc.type === 'doc' && Array.isArray(desc.content)) {
+      descText = desc.content.map((node) => this.parseADF(node as Record<string, unknown>)).join('').trim();
+    } else if (typeof desc === 'string') {
+      // Fallback for plain text descriptions (e.g., from Jira Cloud comments)
+      descText = desc;
+    }
+
+    // Try to extract acceptance criteria from description or custom field
+    let acceptanceCriteria: string | undefined;
+    // Check for custom field (e.g., "Acceptance Criteria" or "AC")
+    for (const [key, value] of Object.entries(fields)) {
+      if (
+        /acceptance.criteria|ac[^a-z]/i.test(key) &&
+        value &&
+        typeof value === 'object' &&
+        'content' in (value as Record<string, unknown>)
+      ) {
+        const acNode = value as Record<string, unknown>;
+        if (acNode.type === 'doc' && Array.isArray(acNode.content)) {
+          acceptanceCriteria = acNode.content
+            .map((n) => this.parseADF(n as Record<string, unknown>))
+            .join('')
+            .trim();
+        }
+      }
+    }
 
     return {
       key: data.key as string,
@@ -117,60 +239,13 @@ export class JiraClient {
         body: (c.body as string) || '',
         created: (c.created as string) || '',
       })),
-    };
-  }
-
-  // ── Mock data ────────────────────────────────────────────
-
-  private mockStory(project: string, storyNumber: string): JiraStory {
-    const key = `${project}-${storyNumber}`;
-    return {
-      key,
-      summary: `[${key}] Implement daily sales aggregation report in BigQuery`,
-      description: `**User Story:**
-As a data analyst, I need a BigQuery SQL query that aggregates daily sales data for executive reporting.
-
-**Requirements:**
-1. Aggregate daily sales data from the \`raw_data.orders\` table
-2. Join with \`staging.product_catalog\` for product names and categories
-3. Join with \`staging.customers\` for customer segmentation
-4. Filter by the last 30 days (configurable)
-5. Group by order date and product category
-6. Include metrics: total revenue, order count, average order value, distinct customers
-7. Use \`analytics.sales_daily\` as the target table
-8. Partition by \`order_date\`
-9. Cluster by \`product_category\`
-
-**Acceptance Criteria:**
-- SQL must be BigQuery-compatible
-- Must handle NULL values gracefully
-- Must include proper comments
-- Should use CTEs for readability
-- Performance: query should complete within 5 minutes on 100M+ rows`,
-      status: 'In Progress',
-      priority: 'High',
-      labels: ['data-engineering', 'bigquery', 'reporting', 'sql-forge'],
-      storyType: 'Story',
-      assignee: 'Data Engineer',
-      reporter: 'Product Manager',
-      comments: [
-        {
-          author: 'Product Manager',
-          body: 'This report is needed for the executive dashboard refresh. Please ensure the SQL handles edge cases like zero-quantity orders and refunds.',
-          created: new Date(Date.now() - 86400000).toISOString(),
-        },
-        {
-          author: 'DBA Lead',
-          body: 'Remember to use IFNULL for revenue calculations. The orders table has some NULL unit_price values from migrated data.',
-          created: new Date(Date.now() - 43200000).toISOString(),
-        },
-      ],
+      acceptanceCriteria,
     };
   }
 }
 
 // ============================================================
-// BigQuery Client
+// BigQuery Client — Real API only, no mocks
 // ============================================================
 
 export class BigQueryClient {
@@ -188,14 +263,18 @@ export class BigQueryClient {
 
   async getDatasets(): Promise<string[]> {
     if (!this.isConfigured) {
-      return ['raw_data', 'staging', 'analytics', 'reporting', 'audit_logs'];
+      throw new Error('BigQuery is not configured. Set GCP_PROJECT_ID and GCP_ACCESS_TOKEN environment variables.');
     }
 
     const url = `https://bigquery.googleapis.com/bigquery/v2/projects/${this.projectId}/datasets`;
     const res = await fetch(url, {
       headers: { Authorization: `Bearer ${this.accessToken}` },
     });
-    if (!res.ok) throw new Error(`BQ API error ${res.status}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      const msg = (err.error?.message as string) || `BQ API error ${res.status}`;
+      throw new Error(msg);
+    }
     const data = await res.json();
     return (data.datasets || []).map((d: Record<string, unknown>) => {
       const ref = d.datasetReference as Record<string, unknown>;
@@ -205,14 +284,18 @@ export class BigQueryClient {
 
   async getTableSchema(datasetId: string, tableId: string): Promise<TableSchema> {
     if (!this.isConfigured) {
-      return this.mockSchema(datasetId, tableId);
+      throw new Error('BigQuery is not configured. Set GCP_PROJECT_ID and GCP_ACCESS_TOKEN environment variables.');
     }
 
-    const url = `https://bigquery.googleapis.com/bigquery/v2/projects/${this.projectId}/datasets/${datasetId}/tables/${tableId}`;
+    const url = `https://bigquery.googleapis.com/bigquery/v2/projects/${this.projectId}/datasets/${encodeURIComponent(datasetId)}/tables/${encodeURIComponent(tableId)}`;
     const res = await fetch(url, {
       headers: { Authorization: `Bearer ${this.accessToken}` },
     });
-    if (!res.ok) throw new Error(`BQ API error ${res.status}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      const msg = (err.error?.message as string) || `BQ API error ${res.status}`;
+      throw new Error(msg);
+    }
     const data = await res.json();
     return {
       datasetId,
@@ -228,10 +311,10 @@ export class BigQueryClient {
 
   async dryRunSql(projectId: string, sql: string): Promise<DryRunResult> {
     if (!this.isConfigured) {
-      return { valid: true, estimatedBytes: 15_728_640, message: 'Dry run passed (mock)' };
+      throw new Error('BigQuery is not configured.');
     }
 
-    const url = `https://bigquery.googleapis.com/bigquery/v2/projects/${projectId}/jobs`;
+    const url = `https://bigquery.googleapis.com/bigquery/v2/projects/${encodeURIComponent(projectId)}/jobs`;
     const res = await fetch(url, {
       method: 'POST',
       headers: {
@@ -239,7 +322,7 @@ export class BigQueryClient {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        configuration: { query: { query: sql, dryRun: true } },
+        configuration: { query: { query: sql, dryRun: true, useLegacySql: false } },
       }),
     });
     if (!res.ok) {
@@ -250,23 +333,20 @@ export class BigQueryClient {
       };
     }
     const data = await res.json();
+    const bytesProcessed = Number(data.statistics?.query?.totalBytesProcessed || 0);
     return {
       valid: true,
-      estimatedBytes: data.statistics?.query?.totalBytesProcessed,
-      message: `Dry run passed. Estimated ${formatBytes(Number(data.statistics?.query?.totalBytesProcessed || 0))} processed.`,
+      estimatedBytes: bytesProcessed,
+      message: `Dry run passed. Estimated ${formatBytes(bytesProcessed)} processed.`,
     };
   }
 
   async runQuery(projectId: string, sql: string): Promise<QueryResult> {
     if (!this.isConfigured) {
-      return {
-        rows: [{ result: 'Query not executed (mock mode — no credentials configured)' }],
-        totalRows: 0,
-        message: 'Mock mode — configure GCP credentials to run actual queries',
-      };
+      throw new Error('BigQuery is not configured.');
     }
 
-    const url = `https://bigquery.googleapis.com/bigquery/v2/projects/${projectId}/queries`;
+    const url = `https://bigquery.googleapis.com/bigquery/v2/projects/${encodeURIComponent(projectId)}/queries`;
     const res = await fetch(url, {
       method: 'POST',
       headers: {
@@ -294,88 +374,10 @@ export class BigQueryClient {
       message: `Query completed. ${data.totalRows || 0} rows returned.`,
     };
   }
-
-  // ── Mock schemas ─────────────────────────────────────────
-
-  private mockSchema(datasetId: string, tableId: string): TableSchema {
-    const schemas: Record<string, TableSchema> = {
-      'raw_data.orders': {
-        datasetId: 'raw_data',
-        tableId: 'orders',
-        columns: [
-          { name: 'order_id', type: 'STRING', mode: 'REQUIRED', description: 'Unique order identifier (UUID)' },
-          { name: 'customer_id', type: 'STRING', mode: 'NULLABLE', description: 'FK to staging.customers' },
-          { name: 'order_date', type: 'TIMESTAMP', mode: 'REQUIRED', description: 'Order placement timestamp' },
-          { name: 'product_id', type: 'STRING', mode: 'REQUIRED', description: 'FK to staging.product_catalog' },
-          { name: 'quantity', type: 'INTEGER', mode: 'REQUIRED', description: 'Number of items ordered' },
-          { name: 'unit_price', type: 'FLOAT', mode: 'NULLABLE', description: 'Price per unit (may be NULL for migrated data)' },
-          { name: 'total_amount', type: 'FLOAT', mode: 'REQUIRED', description: 'Total order amount' },
-          { name: 'discount_amount', type: 'FLOAT', mode: 'NULLABLE', description: 'Discount applied' },
-          { name: 'status', type: 'STRING', mode: 'REQUIRED', description: 'Order status: PLACED, SHIPPED, DELIVERED, REFUNDED' },
-          { name: 'channel', type: 'STRING', mode: 'NULLABLE', description: 'Sales channel: ONLINE, IN_STORE, PARTNER' },
-          { name: 'region', type: 'STRING', mode: 'NULLABLE', description: 'Geographic region' },
-          { name: 'created_at', type: 'TIMESTAMP', mode: 'REQUIRED', description: 'Record creation time' },
-          { name: 'updated_at', type: 'TIMESTAMP', mode: 'REQUIRED', description: 'Record last update time' },
-        ],
-      },
-      'staging.product_catalog': {
-        datasetId: 'staging',
-        tableId: 'product_catalog',
-        columns: [
-          { name: 'product_id', type: 'STRING', mode: 'REQUIRED', description: 'Unique product identifier' },
-          { name: 'product_name', type: 'STRING', mode: 'REQUIRED', description: 'Product display name' },
-          { name: 'category', type: 'STRING', mode: 'REQUIRED', description: 'Product category (e.g. Electronics, Clothing)' },
-          { name: 'subcategory', type: 'STRING', mode: 'NULLABLE', description: 'Product subcategory' },
-          { name: 'brand', type: 'STRING', mode: 'NULLABLE', description: 'Brand name' },
-          { name: 'is_active', type: 'BOOLEAN', mode: 'REQUIRED', description: 'Whether product is currently active' },
-          { name: 'launch_date', type: 'DATE', mode: 'NULLABLE', description: 'Product launch date' },
-        ],
-      },
-      'staging.customers': {
-        datasetId: 'staging',
-        tableId: 'customers',
-        columns: [
-          { name: 'customer_id', type: 'STRING', mode: 'REQUIRED', description: 'Unique customer identifier' },
-          { name: 'customer_name', type: 'STRING', mode: 'REQUIRED', description: 'Customer full name' },
-          { name: 'email', type: 'STRING', mode: 'NULLABLE', description: 'Customer email' },
-          { name: 'segment', type: 'STRING', mode: 'NULLABLE', description: 'Customer segment: ENTERPRISE, SMB, CONSUMER' },
-          { name: 'region', type: 'STRING', mode: 'NULLABLE', description: 'Customer region' },
-          { name: 'signup_date', type: 'DATE', mode: 'NULLABLE', description: 'Customer signup date' },
-        ],
-      },
-      'analytics.sales_daily': {
-        datasetId: 'analytics',
-        tableId: 'sales_daily',
-        columns: [
-          { name: 'report_date', type: 'DATE', mode: 'REQUIRED', description: 'Report date (partition key)' },
-          { name: 'product_category', type: 'STRING', mode: 'REQUIRED', description: 'Product category (cluster key)' },
-          { name: 'total_revenue', type: 'FLOAT', mode: 'REQUIRED', description: 'Total revenue for the day/category' },
-          { name: 'order_count', type: 'INTEGER', mode: 'REQUIRED', description: 'Number of orders' },
-          { name: 'avg_order_value', type: 'FLOAT', mode: 'REQUIRED', description: 'Average order value' },
-          { name: 'distinct_customers', type: 'INTEGER', mode: 'REQUIRED', description: 'Number of unique customers' },
-          { name: 'channel', type: 'STRING', mode: 'NULLABLE', description: 'Sales channel' },
-          { name: 'region', type: 'STRING', mode: 'NULLABLE', description: 'Geographic region' },
-          { name: 'created_at', type: 'TIMESTAMP', mode: 'REQUIRED', description: 'ETL timestamp' },
-        ],
-      },
-    };
-
-    const key = `${datasetId}.${tableId}`;
-    return (
-      schemas[key] || {
-        datasetId,
-        tableId,
-        columns: [
-          { name: 'id', type: 'STRING', mode: 'REQUIRED', description: 'Primary key' },
-          { name: 'created_at', type: 'TIMESTAMP', mode: 'REQUIRED', description: 'Creation timestamp' },
-        ],
-      }
-    );
-  }
 }
 
 // ============================================================
-// GitHub Client
+// GitHub Client — Real API only, no mocks
 // ============================================================
 
 export class GitHubClient {
@@ -400,26 +402,24 @@ export class GitHubClient {
     fileName: string
   ): Promise<{ url: string; number: number }> {
     if (!this.isConfigured) {
-      return {
-        url: `https://github.com/${this.owner || 'org'}/${this.repo || 'repo'}/pull/new/sqlforge-${Date.now()}`,
-        number: 0,
-      };
+      throw new Error('GitHub is not configured. Set GITHUB_TOKEN, GITHUB_OWNER, and GITHUB_REPO environment variables.');
     }
 
     // 1. Get default branch
-    const repoRes = await fetch(`https://api.github.com/repos/${this.owner}/${this.repo}`, {
+    const repoRes = await fetch(`https://api.github.com/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}`, {
       headers: {
         Authorization: `Bearer ${this.token}`,
         Accept: 'application/vnd.github+json',
       },
     });
+    if (!repoRes.ok) throw new Error(`GitHub API error ${repoRes.status} fetching repo info`);
     const repoData = await repoRes.json();
     const baseBranch = repoData.default_branch as string;
 
     // 2. Create branch
     const branchName = `sqlforge/${Date.now()}`;
     const mainSha = await this.getRefSha(baseBranch);
-    await fetch(`https://api.github.com/repos/${this.owner}/${this.repo}/git/refs`, {
+    await fetch(`https://api.github.com/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}/git/refs`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${this.token}`,
@@ -432,7 +432,7 @@ export class GitHubClient {
     // 3. Create file on branch
     const base64Content = Buffer.from(sqlContent).toString('base64');
     await fetch(
-      `https://api.github.com/repos/${this.owner}/${this.repo}/contents/sql/${fileName}`,
+      `https://api.github.com/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}/contents/sql/${encodeURIComponent(fileName)}`,
       {
         method: 'PUT',
         headers: {
@@ -449,7 +449,7 @@ export class GitHubClient {
     );
 
     // 4. Create PR
-    const prRes = await fetch(`https://api.github.com/repos/${this.owner}/${this.repo}/pulls`, {
+    const prRes = await fetch(`https://api.github.com/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}/pulls`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${this.token}`,
@@ -464,13 +464,14 @@ export class GitHubClient {
       }),
     });
 
+    if (!prRes.ok) throw new Error(`GitHub API error ${prRes.status} creating PR`);
     const prData = await prRes.json();
     return { url: prData.html_url as string, number: prData.number as number };
   }
 
   private async getRefSha(branch: string): Promise<string> {
     const res = await fetch(
-      `https://api.github.com/repos/${this.owner}/${this.repo}/git/ref/heads/${branch}`,
+      `https://api.github.com/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}/git/ref/heads/${encodeURIComponent(branch)}`,
       {
         headers: {
           Authorization: `Bearer ${this.token}`,
@@ -478,6 +479,7 @@ export class GitHubClient {
         },
       }
     );
+    if (!res.ok) throw new Error(`GitHub API error ${res.status} fetching branch ref`);
     const data = await res.json();
     return (data.object?.sha as string) || '';
   }

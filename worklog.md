@@ -427,3 +427,30 @@ Stage Summary:
 - Reduced source files from ~90 to 73 (clean split-screen architecture only)
 - Eliminated all references to old multi-view architecture
 - No import breakages — verified with `bun run lint`
+
+---
+Task ID: 1
+Agent: Main Architect
+Task: Review Claude's code review claims against actual codebase, verify each claim, fix all real issues
+
+Work Log:
+- Read all 19 source files (agent.ts, types.ts, api-clients.ts, routes, components, prisma schema)
+- Verified each of the 21 claims in the code review
+- Identified 13 CONFIRMED real issues, 4 INCORRECT claims, 5 valid-but-lower-priority concerns
+- Fixed P0 critical bugs: contextText.join() crash, hardcoded demo tables, unused imports, STM version, fileName
+- Fixed P1 DRY violations: extracted SSE parsing into shared sse-client.ts utility (eliminated 3x duplication)
+- Fixed P1 route duplication: extracted bridge-forwarder.ts (eliminated copy-paste between chat/generate routes)
+- Rewrote all 3 frontend components (input-section, sql-editor, chat-panel) to use shared SSE utility
+- Rewrote api-clients.ts: removed ALL mock data (mockStory, mockSchema, hardcoded datasets), robust recursive ADF parser
+- Rewrote agent.ts: dynamic table inference, retry logic (withRetry), JSON fallback for STM extraction, proper error surfacing
+- Updated Prisma schema from default User/Post to SQLForge-specific (Session, Generation, StmArtifact)
+- All lint checks pass, all compilations clean
+
+Stage Summary:
+- 13 files modified, 2 new files created (sse-client.ts, bridge-forwarder.ts)
+- Zero mock/stub data remains — all clients throw clear errors when credentials not configured
+- STM versioning now increments per session using in-memory counter
+- Filenames include Jira ticket key (e.g., sqlforge_VF-1234_1719234567890.sql)
+- ADF parser handles: paragraph, heading, bulletList, orderedList, codeBlock, blockquote, table, panel, media, text marks (bold/italic/code/link/strikethrough/underline)
+- SSE parsing is now DRY — single source of truth in sse-client.ts
+- Routes share bridge-forwarder.ts — no more copy-paste
