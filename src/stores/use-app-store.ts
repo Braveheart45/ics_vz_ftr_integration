@@ -81,6 +81,7 @@ interface AppState {
 
   // ── Session ─────────────────────────────────────────────
   sessionId: string;
+  hydrateSession: () => void;
   resetSession: () => void;
 }
 
@@ -122,7 +123,7 @@ const initialState = {
   pendingClarification: null as ClarificationRequest | null,
   stmArtifact: null as StmArtifact | null,
 
-  sessionId: generateSessionId(),
+  sessionId: '__pending__',
 };
 
 // ============================================================
@@ -307,6 +308,13 @@ export const useAppStore = create<AppState>((set) => ({
   },
 
   // ── Session ─────────────────────────────────────────────
+  hydrateSession: () => {
+    // Generate sessionId only once on the client (avoids hydration mismatch)
+    const current = useAppStore.getState().sessionId;
+    if (current === '__pending__') {
+      set({ sessionId: generateSessionId() });
+    }
+  },
 
   resetSession: () => {
     set({ ...initialState, sessionId: generateSessionId() });

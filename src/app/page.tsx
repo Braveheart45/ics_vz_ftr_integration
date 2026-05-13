@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect } from 'react';
 import { LeftPanel } from '@/components/split/left-panel';
 import { RightPanel } from '@/components/split/right-panel';
 import { RotateCcw } from 'lucide-react';
@@ -51,7 +52,15 @@ function SqlForgeLogo({ className }: { className?: string }) {
 
 export default function Home() {
   const resetSession = useAppStore((s) => s.resetSession);
+  const hydrateSession = useAppStore((s) => s.hydrateSession);
   const sessionId = useAppStore((s) => s.sessionId);
+
+  // Generate session ID client-side only (prevents hydration mismatch)
+  useEffect(() => {
+    hydrateSession();
+  }, [hydrateSession]);
+
+  const isReady = sessionId !== '__pending__';
 
   return (
     <div className="flex h-dvh flex-col overflow-hidden bg-background">
@@ -90,7 +99,7 @@ export default function Home() {
               <span className="relative inline-flex size-1.5 rounded-full bg-emerald-500" />
             </span>
             <span className="text-[10px] font-mono tabular-nums text-white/60">
-              {sessionId.slice(0, 8)}
+              {isReady ? sessionId.slice(0, 8) : '...'}
             </span>
           </div>
         </div>
