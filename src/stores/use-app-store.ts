@@ -8,11 +8,16 @@ import type {
   BqProjectInput,
   SqlOutput,
   DetectedTaskInfo,
-  ToolCallLog,
   ClarificationRequest,
+  ClarificationHistoryEntry,
   AgentInteractionState,
   StmArtifact,
+  StageStatus,
+  ValidationSummary,
+  AgentActivityEvent,
 } from '@/lib/types';
+import { createClientId } from '@/lib/id';
+import { mergeActivityEvents, normalizeActivityEvent } from '@/lib/activity';
 
 // ============================================================
 // State Interface
@@ -29,7 +34,7 @@ interface AppState {
   jiraInput: JiraInput;
   setJiraInput: (input: Partial<JiraInput>) => void;
 
-  // ── BigQuery Project ─────────────────────────────────────
+  // ── BigQuery Target Scope ────────────────────────────────
   bqProjectInput: BqProjectInput;
   setBqProjectInput: (input: Partial<BqProjectInput>) => void;
 
@@ -43,17 +48,14 @@ interface AppState {
   // ── Chat / Conversation ─────────────────────────────────
   messages: ChatMessage[];
   isStreaming: boolean;
-  toolLogs: ToolCallLog[];
+  streamingContent: string;
   addMessage: (message: Omit<ChatMessage, 'id' | 'timestamp'>) => void;
   updateLastAssistantMessage: (content: string) => void;
   appendToLastAssistantMessage: (content: string) => void;
   setStreaming: (streaming: boolean) => void;
   clearMessages: () => void;
-
-  // ── Tool Call Logs ──────────────────────────────────────
-  addToolLog: (log: Omit<ToolCallLog, 'id' | 'timestamp'>) => void;
-  updateToolLog: (tool: string, status: ToolCallLog['status'], summary: string) => void;
-  clearToolLogs: () => void;
+  appendStreamingContent: (chunk: string) => void;
+  clearStreamingContent: () => void;
 
   // ── SQL Output ──────────────────────────────────────────
   sqlOutput: SqlOutput | null;
@@ -65,19 +67,32 @@ interface AppState {
   // ── Pipeline ────────────────────────────────────────────
   currentStage: WorkflowStage;
   stageMessage: string;
-  setStage: (stage: WorkflowStage, message?: string) => void;
+  activeStages: WorkflowStage[];
+  completedStages: WorkflowStage[];
+  stageHistory: Array<{ stage: WorkflowStage; message: string; timestamp: number }>;
+  setStage: (stage: WorkflowStage, message?: string, status?: StageStatus) => void;
+  clearPipeline: () => void;
 
   // ── Agent ───────────────────────────────────────────────
   isAgentRunning: boolean;
   interactionState: AgentInteractionState;
   pendingClarification: ClarificationRequest | null;
+  clarificationHistory: ClarificationHistoryEntry[];
   setAgentRunning: (running: boolean) => void;
   setInteractionState: (state: AgentInteractionState) => void;
   setPendingClarification: (clarification: ClarificationRequest | null) => void;
+  recordClarificationAnswer: (selectedOptions: string[], freeText: string) => void;
+  clearClarificationHistory: () => void;
 
   // ── STM Artifact ──────────────────────────────────────
   stmArtifact: StmArtifact | null;
   setStmArtifact: (artifact: StmArtifact | null) => void;
+  validationSummary: ValidationSummary | null;
+  setValidationSummary: (summary: ValidationSummary | null) => void;
+  activityEvents: AgentActivityEvent[];
+  addActivityEvent: (event: Partial<AgentActivityEvent>) => void;
+  addActivityEvents: (events: Partial<AgentActivityEvent>[]) => void;
+  clearActivityEvents: () => void;
 
   // ── Session ─────────────────────────────────────────────
   sessionId: string;
@@ -90,7 +105,7 @@ interface AppState {
 // ============================================================
 
 function generateSessionId(): string {
-  return crypto.randomUUID();
+  return createClientId('session');
 }
 
 // ============================================================
@@ -103,28 +118,48 @@ const initialState = {
 
   jiraInput: { project: '', storyNumber: '' } as JiraInput,
 
-  bqProjectInput: { projectId: '' } as BqProjectInput,
+  bqProjectInput: { projectId: '', datasetId: '' } as BqProjectInput,
 
   contextText: '',
   uploadedFiles: [] as UploadedFile[],
 
   messages: [] as ChatMessage[],
   isStreaming: false,
-  toolLogs: [] as ToolCallLog[],
+  streamingContent: '',
 
   sqlOutput: null as SqlOutput | null,
   isMaximized: false,
 
   currentStage: 'idle' as WorkflowStage,
   stageMessage: '',
+  activeStages: [] as WorkflowStage[],
+  completedStages: [] as WorkflowStage[],
+  stageHistory: [] as Array<{ stage: WorkflowStage; message: string; timestamp: number }>,
 
   isAgentRunning: false,
   interactionState: 'idle' as AgentInteractionState,
   pendingClarification: null as ClarificationRequest | null,
+  clarificationHistory: [] as ClarificationHistoryEntry[],
   stmArtifact: null as StmArtifact | null,
+  validationSummary: null as ValidationSummary | null,
+  activityEvents: [] as AgentActivityEvent[],
 
   sessionId: '__pending__',
 };
+
+const WORKFLOW_ORDER: WorkflowStage[] = [
+  'intake',
+  'analysis',
+  'schema_resolution',
+  'sql_generation',
+  'validation',
+  'ready',
+];
+
+function previousWorkflowStages(stage: WorkflowStage): WorkflowStage[] {
+  const index = WORKFLOW_ORDER.indexOf(stage);
+  return index > 0 ? WORKFLOW_ORDER.slice(0, index) : [];
+}
 
 // ============================================================
 // Store
@@ -152,7 +187,7 @@ export const useAppStore = create<AppState>((set) => ({
     }));
   },
 
-  // ── BigQuery Project ─────────────────────────────────────
+  // ── BigQuery Target Scope ────────────────────────────────
 
   setBqProjectInput: (input) => {
     set((state) => ({
@@ -183,7 +218,7 @@ export const useAppStore = create<AppState>((set) => ({
   addMessage: (message) => {
     const newMessage: ChatMessage = {
       ...message,
-      id: crypto.randomUUID(),
+      id: createClientId('message'),
       timestamp: new Date().toISOString(),
     };
     set((state) => ({
@@ -193,7 +228,7 @@ export const useAppStore = create<AppState>((set) => ({
 
   updateLastAssistantMessage: (content) => {
     set((state) => {
-      const lastIdx = state.messages.findLastIndex((m) => m.role === 'assistant');
+      const lastIdx = state.messages.reduceRight((found, m, i) => found === -1 && m.role === 'assistant' ? i : found, -1);
       if (lastIdx === -1) return state;
       const updatedMessages = [...state.messages];
       updatedMessages[lastIdx] = { ...updatedMessages[lastIdx], content };
@@ -203,7 +238,7 @@ export const useAppStore = create<AppState>((set) => ({
 
   appendToLastAssistantMessage: (content) => {
     set((state) => {
-      const lastIdx = state.messages.findLastIndex((m) => m.role === 'assistant');
+      const lastIdx = state.messages.reduceRight((found, m, i) => found === -1 && m.role === 'assistant' ? i : found, -1);
       if (lastIdx === -1) return state;
       const updatedMessages = [...state.messages];
       updatedMessages[lastIdx] = {
@@ -222,37 +257,19 @@ export const useAppStore = create<AppState>((set) => ({
     set({ messages: [] });
   },
 
-  // ── Tool Call Logs ──────────────────────────────────────
-
-  addToolLog: (log) => {
-    const newLog: ToolCallLog = {
-      ...log,
-      id: crypto.randomUUID(),
-      timestamp: new Date().toISOString(),
-    };
-    set((state) => ({
-      toolLogs: [...state.toolLogs, newLog],
-    }));
+  appendStreamingContent: (chunk) => {
+    set((state) => ({ streamingContent: state.streamingContent + chunk }));
   },
 
-  updateToolLog: (tool, status, summary) => {
-    set((state) => {
-      const updatedLogs = state.toolLogs.map((log) =>
-        log.tool === tool ? { ...log, status, summary } : log
-      );
-      return { toolLogs: updatedLogs };
-    });
-  },
-
-  clearToolLogs: () => {
-    set({ toolLogs: [] });
+  clearStreamingContent: () => {
+    set({ streamingContent: '' });
   },
 
   // ── SQL Output ──────────────────────────────────────────
 
   setSqlOutput: (output) => {
     if (output) {
-      set({ sqlOutput: output, currentStage: 'validation' });
+      set({ sqlOutput: output });
     } else {
       set({ sqlOutput: null });
     }
@@ -273,20 +290,67 @@ export const useAppStore = create<AppState>((set) => ({
 
   // ── Pipeline ────────────────────────────────────────────
 
-  setStage: (stage, message) => {
-    set({
-      currentStage: stage,
-      stageMessage: message || '',
+  setStage: (stage, message, status = 'active') => {
+    set((state) => {
+      if (stage === 'idle') {
+        return { currentStage: 'idle' as WorkflowStage, stageMessage: '', activeStages: [] };
+      }
+      // Don't let a stray `active` status for an already-completed stage drag
+      // the pipeline tracker (and the visible "current stage" / message)
+      // backwards. Tool calls fire status events tagged with whatever stage
+      // the bridge maps the tool to — those should narrate but never
+      // regress the matrix.
+      const incomingIndex = WORKFLOW_ORDER.indexOf(stage);
+      const currentIndex = WORKFLOW_ORDER.indexOf(state.currentStage);
+      const stageAlreadyCompleted = state.completedStages.includes(stage);
+      const isRegression = status === 'active' && (stageAlreadyCompleted || (currentIndex > 0 && incomingIndex >= 0 && incomingIndex < currentIndex));
+
+      let activeStages = [...state.activeStages];
+      let completedStages = [...state.completedStages];
+      for (const previousStage of previousWorkflowStages(stage)) {
+        activeStages = activeStages.filter((s) => s !== previousStage);
+        if (!completedStages.includes(previousStage)) completedStages = [...completedStages, previousStage];
+      }
+      if (status === 'completed') {
+        activeStages = activeStages.filter((s) => s !== stage);
+        if (!completedStages.includes(stage)) completedStages = [...completedStages, stage];
+      } else if (status === 'active' && !activeStages.includes(stage) && !stageAlreadyCompleted) {
+        activeStages = [...activeStages, stage];
+      } else if (status === 'failed' || status === 'blocked') {
+        // Terminal non-success states must clear any prior spinner.
+        activeStages = activeStages.filter((s) => s !== stage);
+      }
+
+      // currentStage and stageMessage stay anchored to the furthest stage
+      // already reached — regressions are dropped on the floor.
+      const nextCurrentStage = isRegression ? state.currentStage : stage;
+      const nextMessage = isRegression ? state.stageMessage : (message || '');
+
+      return {
+        currentStage: nextCurrentStage,
+        stageMessage: nextMessage,
+        activeStages,
+        completedStages,
+        stageHistory: [...state.stageHistory, { stage, message: message || '', timestamp: Date.now() }].slice(-100),
+      };
     });
+  },
+
+  clearPipeline: () => {
+    set({ currentStage: 'idle', stageMessage: '', activeStages: [], completedStages: [], stageHistory: [] });
   },
 
   // ── Agent ───────────────────────────────────────────────
 
   setAgentRunning: (running) => {
-    set({
+    set((state) => ({
       isAgentRunning: running,
-      interactionState: running ? 'processing' : 'idle',
-    });
+      interactionState: running
+        ? 'processing'
+        : state.interactionState === 'processing'
+          ? 'idle'
+          : state.interactionState,
+    }));
   },
 
   setInteractionState: (state) => {
@@ -294,17 +358,85 @@ export const useAppStore = create<AppState>((set) => ({
   },
 
   setPendingClarification: (clarification) => {
-    set({
-      pendingClarification: clarification,
-      interactionState: clarification ? 'awaiting_clarification' : 'idle',
-      isAgentRunning: false,
+    set((state) => {
+      // Append to the per-session clarification history the moment Claude
+      // asks a new question. Each entry remains for the rest of the session
+      // (even after the user answers) so the architect can review the full
+      // dialog: question, options offered, what they picked, what context
+      // they added.
+      let history = state.clarificationHistory;
+      if (clarification) {
+        const last = history[history.length - 1];
+        const isDuplicate = last && last.message === clarification.message && !last.answeredAt;
+        if (!isDuplicate) {
+          history = [
+            ...history,
+            {
+              id: createClientId('clarif'),
+              message: clarification.message,
+              explanation: clarification.explanation,
+              details: clarification.details,
+              options: clarification.options,
+              allowFreeText: clarification.allowFreeText,
+              askedAt: Date.now(),
+            },
+          ];
+        }
+      }
+      return {
+        pendingClarification: clarification,
+        clarificationHistory: history,
+        interactionState: clarification ? 'awaiting_clarification' : state.interactionState,
+        isAgentRunning: clarification ? false : state.isAgentRunning,
+      };
     });
+  },
+
+  recordClarificationAnswer: (selectedOptions, freeText) => {
+    set((state) => {
+      if (state.clarificationHistory.length === 0) return state;
+      const lastIndex = state.clarificationHistory.length - 1;
+      const last = state.clarificationHistory[lastIndex];
+      if (last.answeredAt) return state; // Already answered.
+      const updated = [...state.clarificationHistory];
+      updated[lastIndex] = {
+        ...last,
+        selectedOptions: selectedOptions.length > 0 ? selectedOptions : undefined,
+        freeText: freeText.trim() ? freeText.trim() : undefined,
+        answeredAt: Date.now(),
+      };
+      return { clarificationHistory: updated };
+    });
+  },
+
+  clearClarificationHistory: () => {
+    set({ clarificationHistory: [] });
   },
 
   // ── STM Artifact ──────────────────────────────────────
 
   setStmArtifact: (artifact) => {
     set({ stmArtifact: artifact });
+  },
+
+  setValidationSummary: (summary) => {
+    set({ validationSummary: summary });
+  },
+
+  addActivityEvent: (event) => {
+    set((state) => ({
+      activityEvents: mergeActivityEvents(state.activityEvents, [normalizeActivityEvent(event)]),
+    }));
+  },
+
+  addActivityEvents: (events) => {
+    set((state) => ({
+      activityEvents: mergeActivityEvents(state.activityEvents, events),
+    }));
+  },
+
+  clearActivityEvents: () => {
+    set({ activityEvents: [] });
   },
 
   // ── Session ─────────────────────────────────────────────
@@ -317,6 +449,6 @@ export const useAppStore = create<AppState>((set) => ({
   },
 
   resetSession: () => {
-    set({ ...initialState, sessionId: generateSessionId() });
+    set({ ...initialState, sessionId: generateSessionId(), activeStages: [], completedStages: [], stageHistory: [], streamingContent: '', validationSummary: null, activityEvents: [], clarificationHistory: [] });
   },
 }));

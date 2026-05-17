@@ -1,0 +1,1 @@
+@skills/sqlforge/SKILL.md

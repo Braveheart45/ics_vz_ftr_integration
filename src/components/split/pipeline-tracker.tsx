@@ -5,216 +5,200 @@ import {
   Search,
   Database,
   Code,
-  ShieldCheck,
+  Shield,
   Rocket,
   Check,
   Loader2,
-  Table2,
-  Download,
-  FileSpreadsheet,
+  AlertTriangle,
 } from 'lucide-react';
+import { useEffect, useMemo, useState } from 'react';
 import { useAppStore } from '@/stores/use-app-store';
-import type { WorkflowStage, StmRow } from '@/lib/types';
+import type { WorkflowStage } from '@/lib/types';
 import { cn } from '@/lib/utils';
-import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
-import { toast } from 'sonner';
-import { useCallback, useState } from 'react';
-
-// ============================================================
-// Stage Definitions — No 'idle' (pipeline only shows active stages)
-// ============================================================
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
 
 const STAGES: {
   id: WorkflowStage;
-  label: string;
   shortLabel: string;
   icon: typeof Inbox;
 }[] = [
-  { id: 'intake', label: 'Intake', shortLabel: 'Intake', icon: Inbox },
-  { id: 'analysis', label: 'Analysis', shortLabel: 'Analyze', icon: Search },
-  { id: 'schema_resolution', label: 'Schema Resolution', shortLabel: 'Schema', icon: Database },
-  { id: 'sql_generation', label: 'SQL Generation', shortLabel: 'Generate', icon: Code },
-  { id: 'validation', label: 'Validation', shortLabel: 'Validate', icon: ShieldCheck },
-  { id: 'ready', label: 'Ready to Deploy', shortLabel: 'Ready', icon: Rocket },
+  { id: 'intake', shortLabel: 'Intake', icon: Inbox },
+  { id: 'analysis', shortLabel: 'Analyze', icon: Search },
+  { id: 'schema_resolution', shortLabel: 'Schema', icon: Database },
+  { id: 'sql_generation', shortLabel: 'Generate', icon: Code },
+  { id: 'validation', shortLabel: 'Validate', icon: Shield },
+  { id: 'ready', shortLabel: 'Ready', icon: Rocket },
 ];
 
-const STAGE_ORDER: WorkflowStage[] = STAGES.map((s) => s.id);
-
-// ============================================================
-// CSV Export Utility
-// ============================================================
-
-const STM_COLUMNS: { key: keyof StmRow; label: string }[] = [
-  { key: 'sourceField', label: 'Source Field' },
-  { key: 'sourceTable', label: 'Source Table' },
-  { key: 'sourceType', label: 'Src Type' },
-  { key: 'targetColumn', label: 'Target Column' },
-  { key: 'targetTable', label: 'Target Table' },
-  { key: 'targetType', label: 'Tgt Type' },
-  { key: 'transformation', label: 'Transformation' },
-  { key: 'businessRule', label: 'Business Rule' },
-  { key: 'notes', label: 'Notes' },
-];
-
-function buildCsv(artifact: { rows: StmRow[]; title: string }): string {
-  const headers = STM_COLUMNS.map((c) => c.label);
-  const rows = artifact.rows.map((r) => STM_COLUMNS.map((c) => r[c.key]));
-  const lines = [headers, ...rows].map((row) =>
-    row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(',')
-  );
-  return lines.join('\n');
+interface PipelineTrackerProps {
+  variant?: 'full' | 'compact';
+  className?: string;
 }
 
-// ============================================================
-// Component
-// ============================================================
+export function PipelineTracker({ variant = 'full', className }: PipelineTrackerProps) {
+  const currentStage = useAppStore((state) => state.currentStage);
+  const stageMessage = useAppStore((state) => state.stageMessage);
+  const activeStages = useAppStore((state) => state.activeStages);
+  const completedStages = useAppStore((state) => state.completedStages);
+  const interactionState = useAppStore((state) => state.interactionState);
+  const stageHistory = useAppStore((state) => state.stageHistory);
+  const isAgentRunning = useAppStore((state) => state.isAgentRunning);
 
-export function PipelineTracker() {
-  const currentStage = useAppStore((s) => s.currentStage);
-  const stageMessage = useAppStore((s) => s.stageMessage);
-  const stmArtifact = useAppStore((s) => s.stmArtifact);
-  const [showStmPopover, setShowStmPopover] = useState(false);
+  const [now, setNow] = useState(Date.now());
 
-  // When idle, no stage is active — all appear as future
   const isIdle = currentStage === 'idle';
-  const currentIdx = isIdle ? -1 : STAGE_ORDER.indexOf(currentStage);
+  const isError = interactionState === 'error';
 
-  const handleDownloadCsv = useCallback(() => {
-    if (!stmArtifact) return;
-    const csv = buildCsv(stmArtifact);
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `STM_${stmArtifact.title.replace(/\s+/g, '_')}_${Date.now()}.csv`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-    toast.success('STM downloaded as CSV');
-  }, [stmArtifact]);
+  const currentStageStartedAt = useMemo(() => {
+    const currentEntries = stageHistory.filter((e) => e.stage === currentStage);
+    return currentEntries.at(-1)?.timestamp ?? Date.now();
+  }, [currentStage, stageHistory]);
 
-  return (
-    <div className="flex h-full flex-col justify-center gap-1 px-5">
-      <div className="flex items-center w-full min-w-0">
-        {/* Pipeline stages — takes remaining space */}
-        <div className="flex items-center flex-1 min-w-0 stagger-children">
-          {STAGES.map((stage, idx) => {
-            const isCompleted = idx < currentIdx;
-            const isCurrent = idx === currentIdx;
-            const Icon = stage.icon;
+  const elapsedSeconds = Math.max(0, Math.floor((now - currentStageStartedAt) / 1000));
+  const showHeartbeat = isAgentRunning && !isIdle && !isError && elapsedSeconds >= 20;
 
-            return (
-              <div key={stage.id} className="flex items-center animate-fade-in-up">
-                {/* Stage indicator */}
-                <div className="flex flex-col items-center gap-1.5 group cursor-default">
+  useEffect(() => {
+    if (!isAgentRunning) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [isAgentRunning]);
+
+  if (variant === 'compact') {
+    return (
+      <div className={cn('flex min-w-0 items-center gap-1 rounded-md border border-border/50 bg-background/75 px-1.5 py-1', className)}>
+        {STAGES.map((stage, idx) => {
+          const isCompleted = completedStages.includes(stage.id);
+          const isActive = activeStages.includes(stage.id);
+          const isCurrentError = isError && stage.id === currentStage;
+          const Icon = stage.icon;
+
+          const dotStyle = isCurrentError
+            ? 'bg-red-500 text-white'
+            : isCompleted
+              ? 'bg-[#4285F4] text-white'
+              : isActive
+                ? 'bg-[#4285F4] text-white animate-pulse-ring'
+                : isIdle
+                  ? 'bg-muted text-foreground/35'
+                  : 'bg-muted text-foreground/55';
+
+          const connectorStyle = isCompleted
+            ? 'bg-[#4285F4]/50'
+            : isActive
+              ? isCurrentError ? 'bg-red-400/50' : 'animate-connector-pulse bg-[#4285F4]'
+              : isIdle ? 'bg-border/40' : 'bg-border';
+
+          const statusText = isCurrentError
+            ? 'failed'
+            : isCompleted
+              ? 'completed'
+              : isActive
+                ? 'active'
+                : 'pending';
+
+          return (
+            <div key={stage.id} className="flex items-center">
+              <Tooltip>
+                <TooltipTrigger asChild>
                   <div
-                    className={cn(
-                      'flex items-center justify-center size-7 rounded-full transition-all duration-300',
-                      isCompleted
-                        ? 'bg-[#F97316] text-white shadow-[0_1px_3px_0_oklch(0.65_0.2_45/0.3)] hover:scale-110'
-                        : isCurrent
-                          ? 'bg-[#4285F4] text-white shadow-[0_1px_3px_0_oklch(0.59_0.19_264/0.3)] animate-pulse-ring'
-                          : isIdle
-                            ? 'bg-muted text-foreground/30'
-                            : 'bg-muted text-foreground/50 group-hover:bg-muted group-hover:text-foreground/70 transition-colors'
-                    )}
+                    className={cn('flex size-6 cursor-default items-center justify-center rounded-full transition-all duration-300', dotStyle)}
+                    aria-label={`${stage.shortLabel} ${statusText}`}
                   >
-                    {isCompleted ? (
+                    {isCurrentError ? (
+                      <AlertTriangle className="size-3.5" strokeWidth={2.5} />
+                    ) : isCompleted ? (
                       <Check className="size-3.5" strokeWidth={2.5} />
-                    ) : isCurrent ? (
+                    ) : isActive ? (
                       <Loader2 className="size-3.5 animate-spin" strokeWidth={2} />
                     ) : (
                       <Icon className="size-3.5" strokeWidth={1.75} />
                     )}
                   </div>
-                  <span
-                    className={cn(
-                      'text-[10px] leading-none font-bold tracking-[0.01em] whitespace-nowrap hidden md:block transition-colors duration-300',
-                      isCompleted
-                        ? 'text-foreground'
-                        : isCurrent
-                          ? 'text-foreground font-extrabold'
-                          : isIdle
-                            ? 'text-foreground/30'
-                            : 'text-foreground/70 group-hover:text-foreground'
-                    )}
-                  >
-                    {stage.shortLabel}
-                  </span>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" sideOffset={6} className="text-xs">
+                  {stage.shortLabel} · {statusText}
+                </TooltipContent>
+              </Tooltip>
+
+              {idx < STAGES.length - 1 && (
+                <div className={cn('mx-0.5 h-[2px] w-3 rounded-full transition-all duration-700', connectorStyle)} />
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  return (
+    <div className={cn('flex min-w-0 items-center gap-3 rounded-md border border-border/40 bg-background/70 px-2 py-1', className)}>
+      <div className="flex min-w-0 items-center">
+        {STAGES.map((stage, idx) => {
+          const isCompleted = completedStages.includes(stage.id);
+          const isActive = activeStages.includes(stage.id);
+          const isCurrentError = isError && stage.id === currentStage;
+          const Icon = stage.icon;
+
+          const dotStyle = isCurrentError
+            ? 'bg-red-500 text-white'
+            : isCompleted
+              ? 'bg-[#4285F4] text-white'
+              : isActive
+                ? 'bg-[#4285F4] text-white animate-pulse-ring'
+                : isIdle
+                  ? 'bg-muted text-foreground/30'
+                  : 'bg-muted text-foreground/50';
+
+          const labelStyle = isCurrentError
+            ? 'text-red-500'
+            : isCompleted || isActive
+              ? 'text-foreground'
+              : 'text-foreground/50';
+
+          const connectorStyle = isCompleted
+            ? 'bg-[#4285F4]/50'
+            : isActive
+              ? isCurrentError ? 'bg-red-400/50' : 'animate-connector-pulse bg-[#4285F4]'
+              : isIdle ? 'bg-border/40' : 'bg-border';
+
+          return (
+            <div key={stage.id} className="flex items-center">
+              <div className="flex items-center gap-1">
+                <div className={cn('flex size-5 items-center justify-center rounded-full transition-all duration-300', dotStyle)}>
+                  {isCurrentError ? (
+                    <AlertTriangle className="size-3" strokeWidth={2.5} />
+                  ) : isCompleted ? (
+                    <Check className="size-3" strokeWidth={2.5} />
+                  ) : isActive ? (
+                    <Loader2 className="size-3 animate-spin" strokeWidth={2} />
+                  ) : (
+                    <Icon className="size-3" strokeWidth={1.75} />
+                  )}
                 </div>
-
-                {/* Connector */}
-                {idx < STAGES.length - 1 && (
-                  <div className="flex items-center mx-0.5">
-                    <div
-                      className={cn(
-                        'h-[2px] rounded-full transition-all duration-700',
-                        'w-4 sm:w-10 lg:w-14',
-                        isCompleted
-                          ? 'bg-[#F97316]/50'
-                          : isCurrent
-                            ? 'animate-connector-pulse bg-[#4285F4]'
-                            : isIdle
-                              ? 'bg-border/40'
-                              : 'bg-border'
-                      )}
-                    />
-                  </div>
-                )}
+                <span className={cn('hidden text-[9px] font-bold leading-none tracking-[0.01em] md:block', labelStyle)}>
+                  {stage.shortLabel}
+                </span>
               </div>
-            );
-          })}
-        </div>
 
-        {/* ── Vertical divider ── */}
-        <div className="shrink-0 mx-3 h-8 w-px bg-border/50" />
-
-        {/* ── STM Section (beside pipeline) ── */}
-        <div className="shrink-0 flex flex-col items-center gap-1">
-          {stmArtifact ? (
-            <div className="relative">
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={handleDownloadCsv}
-                className="h-8 px-3 text-[10px] font-semibold text-emerald-700 hover:text-emerald-800 hover:bg-emerald-50 gap-1.5 rounded-lg shadow-[0_1px_3px_0_oklch(0.65_0.17_163/0.12)] border border-emerald-200/40 transition-all duration-200 hover:scale-[1.02] hover:shadow-[0_2px_6px_0_oklch(0.65_0.17_163/0.18)]"
-              >
-                <FileSpreadsheet className="size-3.5" />
-                <span>Download updated STM</span>
-              </Button>
-              <Badge
-                variant="secondary"
-                className="absolute -top-1.5 -right-1.5 text-[8px] px-1 py-0 font-bold text-white bg-emerald-500 border-0 min-w-[16px] text-center"
-              >
-                {stmArtifact.rows.length}
-              </Badge>
+              {idx < STAGES.length - 1 && (
+                <div className={cn('mx-1 h-[2px] w-3 rounded-full transition-all duration-700 lg:w-5', connectorStyle)} />
+              )}
             </div>
-          ) : (
-            <div className="flex items-center gap-1.5 h-8 px-3 rounded-lg border border-dashed border-border/60">
-              <Table2 className="size-3 text-muted-foreground/35" />
-              <span className="text-[10px] font-medium text-muted-foreground/40 whitespace-nowrap">
-                STM pending
-              </span>
-            </div>
-          )}
-          {stmArtifact && (
-            <span className="text-[9px] font-semibold text-emerald-600/60 hidden lg:block">
-              {stmArtifact.rows.length} {stmArtifact.rows.length === 1 ? 'mapping' : 'mappings'} ready
-            </span>
-          )}
-        </div>
+          );
+        })}
       </div>
 
-      {/* Stage message */}
-      {stageMessage && !isIdle && (
-        <div className="text-center animate-fade-in">
-          <span className="text-[10px] font-semibold text-[#4285F4]/80 tracking-wide">
-            {stageMessage}
-          </span>
-        </div>
-      )}
+      <div className="hidden min-w-[120px] max-w-[260px] truncate text-[10px] font-semibold text-[#4285F4]/80 lg:block">
+        {isError
+          ? stageMessage || 'Generation failed'
+          : showHeartbeat
+            ? `${stageMessage || 'Claude Code is working'} · ${elapsedSeconds}s`
+            : stageMessage || ''}
+      </div>
     </div>
   );
 }

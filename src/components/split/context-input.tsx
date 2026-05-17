@@ -18,7 +18,7 @@ export function ContextInput() {
         onChange={(e) => setContextText(e.target.value)}
         placeholder="Describe requirements, mappings, or paste context..."
         className={cn(
-          'min-h-[80px] max-h-[160px] resize-y text-sm leading-relaxed transition-all duration-200',
+          'min-h-[96px] max-h-[160px] resize-y rounded-lg text-sm font-medium leading-relaxed transition-all duration-200',
           'placeholder:text-foreground/50',
           'border-border shadow-[0_1px_2px_0_oklch(0_0_0/0.03)]',
           'focus-visible:border-primary/30 focus-visible:shadow-[0_1px_3px_0_oklch(0.55_0.15_264/0.08)]'
@@ -26,7 +26,7 @@ export function ContextInput() {
         aria-label="Context input"
         maxLength={MAX_CHARS}
       />
-      <div className="absolute bottom-2 right-2.5 text-[10px] tabular-nums font-semibold text-foreground/50">
+      <div className="absolute bottom-2 right-2.5 text-[10px] tabular-nums font-medium text-muted-foreground">
         {contextText.length.toLocaleString()}
         <span className="text-foreground/30">/{MAX_CHARS.toLocaleString()}</span>
       </div>

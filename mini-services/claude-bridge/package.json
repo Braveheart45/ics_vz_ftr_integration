@@ -1,7 +1,7 @@
 {
   "name": "claude-bridge",
   "version": "1.0.0",
-  "description": "Claude Code CLI → HTTP/SSE Bridge for SQLForge",
+  "description": "Claude Code CLI → HTTP/SSE Bridge for SQL Curator",
   "private": true,
   "scripts": {
     "dev": "bun --hot index.js",

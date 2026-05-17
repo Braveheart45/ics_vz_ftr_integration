@@ -3,7 +3,8 @@
 import { useEffect } from 'react';
 import { LeftPanel } from '@/components/split/left-panel';
 import { RightPanel } from '@/components/split/right-panel';
-import { RotateCcw } from 'lucide-react';
+import { ValidationSummaryPane } from '@/components/split/validation-summary-pane';
+import { AlertTriangle, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   Tooltip,
@@ -12,10 +13,10 @@ import {
 } from '@/components/ui/tooltip';
 import { useAppStore } from '@/stores/use-app-store';
 
-// ── SQLForge Logo Mark ────────────────────────────────────────
+// ── SQL Curator Logo Mark ─────────────────────────────────────
 // BigQuery-inspired magnifying glass over database cylinder
 // with AI sparkle neural nodes — orange color scheme
-function SqlForgeLogo({ className }: { className?: string }) {
+function SqlCuratorLogo({ className }: { className?: string }) {
   return (
     <svg
       className={className}
@@ -73,17 +74,27 @@ function SqlForgeLogo({ className }: { className?: string }) {
 export default function Home() {
   const resetSession = useAppStore((s) => s.resetSession);
   const hydrateSession = useAppStore((s) => s.hydrateSession);
-  const sessionId = useAppStore((s) => s.sessionId);
+  const pendingClarification = useAppStore((s) => s.pendingClarification);
+  const interactionState = useAppStore((s) => s.interactionState);
+  const validationSummary = useAppStore((s) => s.validationSummary);
+  const validationIssueCount = validationSummary
+    ? [
+        validationSummary.requirementCoverage,
+        validationSummary.stmCompleteness,
+        validationSummary.schemaReconciliation,
+        validationSummary.sqlChecks,
+        validationSummary.jiraTransition,
+      ].filter((section) => section?.status === 'warning' || section?.status === 'fail').length
+    : 0;
+  const issueCount = (pendingClarification || interactionState === 'error' ? 1 : 0) + validationIssueCount;
 
   // Generate session ID client-side only (prevents hydration mismatch)
   useEffect(() => {
     hydrateSession();
   }, [hydrateSession]);
 
-  const isReady = sessionId !== '__pending__';
-
   return (
-    <div className="flex h-dvh flex-col overflow-hidden bg-background">
+    <div className="sql-curator-app flex h-dvh flex-col overflow-hidden bg-background">
       {/* ── Header ─────────────────────────────────────────── */}
       <header className="relative flex h-[52px] shrink-0 items-center justify-center border-b border-white/[0.06] px-5 shadow-[0_1px_4px_0_oklch(0_0_0/0.15)] bg-[#1B2D4F]">
         {/* Subtle accent line at bottom */}
@@ -92,12 +103,12 @@ export default function Home() {
         {/* Center: Branding — main focus */}
         <div className="flex items-center gap-3.5">
           <div className="relative flex size-10 items-center justify-center rounded-xl bg-gradient-to-br from-orange-500 to-orange-600 shadow-md transition-transform duration-200 hover:scale-110 active:scale-95">
-            <SqlForgeLogo className="size-6" />
+            <SqlCuratorLogo className="size-6" />
           </div>
           <div className="flex flex-col items-start">
             <div className="flex items-baseline gap-2.5">
               <span className="text-[19px] font-bold tracking-[-0.025em] text-white leading-none">
-                SQLForge
+                SQL Curator
               </span>
               <span className="hidden text-[10px] font-bold uppercase tracking-[0.1em] text-orange-400 sm:inline">
                 Agent
@@ -109,49 +120,51 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Left: Session (absolute positioned) */}
-        <div className="absolute left-5 hidden items-center gap-2 md:flex">
-          <div className="flex items-center gap-1.5 rounded-full border border-white/[0.08] bg-white/[0.06] px-2.5 py-1">
-            <span className="relative flex size-1.5">
-              <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400 opacity-60" />
-              <span className="relative inline-flex size-1.5 rounded-full bg-emerald-500" />
-            </span>
-            <span className="text-[10px] font-mono tabular-nums text-white/60">
-              {isReady ? sessionId.slice(0, 8) : '...'}
-            </span>
-          </div>
-        </div>
-
         {/* Right: Reset (absolute positioned) */}
         <div className="absolute right-5">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-8 text-white/40 hover:text-white hover:bg-white/[0.08] transition-all duration-200"
-                onClick={() => resetSession()}
-              >
-                <RotateCcw className="size-3.5" />
-                <span className="sr-only">New Session</span>
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom" className="text-xs">
-              <p>New Session</p>
-            </TooltipContent>
-          </Tooltip>
+          <div className="flex items-center gap-2">
+            {issueCount > 0 && (
+              <div className="flex h-7 items-center gap-1.5 rounded-md border border-orange-300/30 bg-orange-500/15 px-2 text-[11px] font-bold text-orange-100">
+                <AlertTriangle className="size-3" />
+                {issueCount} {issueCount === 1 ? 'issue' : 'issues'}
+              </div>
+            )}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-8 text-white/40 hover:text-white hover:bg-white/[0.08] transition-all duration-200"
+                  onClick={() => resetSession()}
+                >
+                  <RotateCcw className="size-3.5" />
+                  <span className="sr-only">New Session</span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" className="text-xs">
+                <p>New Session</p>
+              </TooltipContent>
+            </Tooltip>
+          </div>
         </div>
       </header>
 
-      {/* ── Split Layout ────────────────────────────────────── */}
-      <div className="flex min-h-0 flex-1 flex-col md:flex-row">
-        {/* Left — SQL Output & Pipeline */}
-        <div className="animate-slide-in-left relative flex min-h-0 flex-1 flex-col border-r border-border/50 md:flex-[58]">
+      {/* ── Three-Pane Layout ───────────────────────────────── */}
+      <div className="flex min-h-0 flex-1 flex-col lg:grid lg:grid-cols-[minmax(0,40%)_minmax(0,30%)_minmax(0,30%)]">
+        {/* Left — SQL Output */}
+        <div className="animate-slide-in-left relative flex min-h-0 min-w-0 flex-col border-r border-border/50">
           <LeftPanel />
         </div>
 
-        {/* Right — Intake & Interaction */}
-        <div className="animate-slide-in-right relative flex min-h-0 flex-1 flex-col md:flex-[42] md:max-w-[520px] lg:max-w-[580px]">
+        {/* Middle — Claude Activity */}
+        <div className="relative flex min-h-0 min-w-0 flex-col border-r border-border/50 bg-background">
+          <div className="h-full min-h-0 p-2.5">
+            <ValidationSummaryPane />
+          </div>
+        </div>
+
+        {/* Right — Intake & Clarification Assistant */}
+        <div className="animate-slide-in-right relative flex min-h-0 min-w-0 flex-col">
           <RightPanel />
         </div>
       </div>

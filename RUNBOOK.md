@@ -1,4 +1,4 @@
-# SQLForge — Operations Runbook
+# SQL Curator — Operations Runbook
 
 ## AI-Powered SQL Generation & Legacy Conversion Agent
 ### Claude Code CLI Integration (Local, API-Free Architecture)
@@ -11,26 +11,30 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                        SQLForge Frontend                            │
+│                       SQL Curator Frontend                          │
 │            (Next.js 16 — React 19 + TypeScript + Tailwind)          │
 │                                                                     │
 │  ┌──────────────────────┐  ┌──────────────────────────────────────┐ │
 │  │    LEFT PANEL        │  │         RIGHT PANEL                  │ │
 │  │  ┌────────────────┐  │  │  ┌────────────────────────────────┐  │ │
 │  │  │  SQL Editor     │  │  │  │  Task Type Selector            │  │ │
-│  │  │  (4/5 height)  │  │  │  ├────────────────────────────────┤  │ │
+│  │  │  (flex grow)   │  │  │  ├────────────────────────────────┤  │ │
 │  │  ├────────────────┤  │  │  │  Jira Project + Story Number   │  │ │
-│  │  │  Pipeline      │  │  │  │  BigQuery Project (mandatory)  │  │ │
-│  │  │  Tracker       │  │  │  │  File Upload + Context Input   │  │ │
-│  │  │  (1/5 height)  │  │  │  ├────────────────────────────────┤  │ │
-│  │  └────────────────┘  │  │  │  "Submit & Generate" Button    │  │ │
-│  └──────────────────────┘  │  ├────────────────────────────────┤  │ │
-│                             │  │  Chat Panel                    │  │ │
-│                             │  │  (Bidirectional Q&A)           │  │ │
-│                             │  │  • Messages                    │  │ │
-│                             │  │  • Tool Call Progress          │  │ │
-│                             │  │  • Clarification Prompts       │  │ │
-│                             │  │  • Follow-up Input             │  │ │
+│  │  │  STM Viewer    │  │  │  │  BigQuery Project (mandatory)  │  │ │
+│  │  │  (collapsible) │  │  │  │  File Upload + Context Input   │  │ │
+│  │  └────────────────┘  │  │  ├────────────────────────────────┤  │ │
+│  └──────────────────────┘  │  │  "Submit & Generate" Button    │  │ │
+│                             │  ├────────────────────────────────┤  │ │
+│                             │  │  Activity Feed                 │  │ │
+│                             │  │  • Pipeline Tracker (compact)  │  │ │
+│                             │  │  • Findings / Decisions /      │  │ │
+│                             │  │    Inferences / Validations    │  │ │
+│                             │  │  • Per-stage grouped cards     │  │ │
+│                             │  ├────────────────────────────────┤  │ │
+│                             │  │  SQL Curator Assistant         │  │ │
+│                             │  │  (Clarification Q&A)           │  │ │
+│                             │  │  • Persistent Q&A history      │  │ │
+│                             │  │  • Option chips + free text    │  │ │
 │                             │  └────────────────────────────────┘  │ │
 │                             └──────────────────────────────────────┘ │
 └───────────────────────────┬─────────────────────────────────────────┘
@@ -108,7 +112,12 @@
 | **Communication** | HTTP + SSE streaming | Real-time progress updates to UI. SSE is simpler than WebSocket for this use case |
 | **Bridge Pattern** | Separate Node.js mini-service | Isolation from Next.js process. Independent scaling, crash recovery |
 | **Conversation Context** | In-memory session store + `--resume` flag | Claude maintains context across multi-turn interactions |
-| **Bidirectional** | Chat panel follow-up + clarification events | Claude can ask questions, user responds through same chat workflow |
+| **Activity Feed** | Inline `activity` JSON blocks in Claude output | Live per-stage findings streamed as cards; no plumbing language visible |
+| **Two-pass Jira** | Main run blocks Jira writes via `--disallowedTools`; follow-up pass runs after gate | Guarantees comment + transition happen only after dry-run passes |
+| **Strict validation gate** | `sqlChecks.status` must be `pass` or SQL is withheld | Prevents unvalidated SQL from reaching the editor |
+| **Clarification history** | Persistent store of all Q&A per session | Architect can review every question, option selection, and context across rounds |
+| **Stage regression guard** | Zustand `setStage` refuses to move pipeline backwards | Stray tool-pair status events cannot re-activate completed stages |
+| **Semantic tool translation** | Bridge maps tool_use + tool_result pairs to architect-readable findings | No MCP plumbing language reaches the Activity Feed |
 | **Fallback** | Built-in agent (z-ai-web-dev-sdk) | Works without Claude CLI for basic testing. Requires real credentials for Jira/BQ/GitHub APIs |
 
 ### 1.3 Confirmation: API-Free Architecture
@@ -196,7 +205,7 @@ claude -p "Say hello" --output-format stream-json
 
 ```bash
 # Clone the repository
-cd sqlforge
+cd sql-curator
 
 # Install dependencies
 bun install
@@ -218,7 +227,7 @@ cd mini-services/claude-bridge
 bun run dev
 
 # Terminal 2: Start the Next.js application (port 3000)
-cd /path/to/sqlforge
+cd /path/to/sql-curator
 bun run dev
 ```
 
@@ -261,7 +270,7 @@ USE_CLAUDE_BRIDGE=false
 
 ### 4.1 How It Works
 
-SQLForge supports **fully bidirectional interaction** between the user and Claude Code:
+SQL Curator supports **fully bidirectional interaction** between the user and Claude Code:
 
 ```
 User Input ──────────→ Claude Code ──────────→ SQL Output
@@ -323,13 +332,14 @@ The bridge emits the following SSE events:
 
 | Event | Data | UI Effect |
 |-------|------|-----------|
-| `status` | `{ stage, message }` | Pipeline tracker advances, stage message updates |
-| `tool_call` | `{ tool, args }` | Wrench icon appears with spinning animation |
-| `tool_result` | `{ tool, success, summary }` | Green check or red error icon, summary text |
-| `message` | `{ content }` | Full assistant message displayed in chat bubble |
-| `sql` | `{ sql, fileName }` | SQL editor populated with syntax-highlighted code |
-| `clarification` | `{ message, needsInput }` | Orange "needs information" banner in chat panel |
-| `error` | `{ message }` | Error message in chat, pipeline returns to idle |
+| `status` | `{ stage, message }` | Pipeline tracker advances (regression-guarded — never moves backwards) |
+| `activity_event` | `{ stage, type, status, title, summary, details[], confidence, evidence[], source }` | New card added to Activity Feed live during run |
+| `message` | `{ content }` | Full assistant message displayed in SQL Curator Assistant pane |
+| `sql` | `{ sql, fileName }` | SQL editor populated; only emitted when `sqlChecks.status === 'pass'` |
+| `stm` | `{ stmArtifact }` | STM artifact stored; table viewer and download buttons activate |
+| `validation` | `{ validationSummary }` | 5 structured section cards appended to Activity Feed |
+| `clarification` | `{ message, options[], allowFreeText, explanation, details }` | Clarification card shown in SQL Curator Assistant; history entry created |
+| `error` | `{ message }` | Error card shown in Assistant pane; pipeline stage marked failed at current stage |
 | `done` | `{ success }` | Streaming stops, agent state finalized |
 
 ### 5.2 Pipeline Stages
@@ -403,9 +413,12 @@ data: {"success":true,"timestamp":...}
 | `USE_CLAUDE_BRIDGE` | `true` | Route requests through claude-bridge.js |
 | `BRIDGE_PORT` | `3001` | Port for the claude-bridge mini-service |
 | `CLAUDE_MAX_CONCURRENT` | `3` | Max concurrent Claude CLI processes |
-| `CLAUDE_MAX_TURNS` | `15` | Max agent turns per request |
+| `CLAUDE_MAX_TURNS` | `25` | Max agent turns per request |
 | `CLAUDE_TIMEOUT_MS` | `180000` | Request timeout (3 minutes) |
 | `MAX_HISTORY_MESSAGES` | `20` | Max messages per session history |
+| `SQL_CURATOR_REQUIRE_DRYRUN_PASS` | `true` | If `true`, SQL is withheld from the UI unless `sqlChecks.status === 'pass'` |
+| `SQL_CURATOR_DEFER_JIRA_COMPLETION` | `true` | If `true`, Jira comment + transition run in a separate follow-up Claude pass after the gate clears |
+| `SQL_CURATOR_JIRA_COMPLETION_TIMEOUT_MS` | `120000` | Timeout for the Jira follow-up pass (2 minutes) |
 
 ### 6.2 MCP Server Configuration
 
@@ -419,7 +432,58 @@ MCP servers are configured in `~/.claude.json` (NOT in the application). This is
 
 ---
 
-## 7. Troubleshooting
+## 7. Production Architecture Details
+
+### 7.1 Activity Feed — Live Streaming Protocol
+
+The Activity Feed (right panel, top section) shows architect-readable findings, decisions, inferences, and validations as they happen — not all at once at the end.
+
+**How it works:**
+
+1. Claude emits fenced ` ```activity ` JSON blocks inline during its response stream.
+2. The bridge's `processInlineActivities()` scans each new text delta as it arrives and immediately forwards completed blocks as `activity_event` SSE events.
+3. The frontend appends each card to the feed without waiting for the run to finish.
+4. At run end, only the 5 structured validation section cards (Requirement Coverage, STM Completeness, Schema Reconciliation, SQL Checks, Jira Transition) are appended from the `validation` event.
+
+**What appears in the feed:**
+- Findings from each stage (intake, analysis, schema_resolution, sql_generation, validation, ready)
+- Inferences with confidence % and evidence
+- Decisions with rationale
+- Dry-run results and auto-fixes
+- No MCP plumbing language ("Calling BigQuery MCP" is never shown)
+
+### 7.2 Two-Pass Jira Workflow
+
+For Jira-backed runs, the Jira comment and status transition are strictly the last actions — enforced at the tool level:
+
+**Main pass (Claude's generation run):**
+- Jira write tools (`addCommentToJiraIssue`, `transitionJiraIssue`, etc.) are blocked via `--disallowedTools`
+- Jira read tools remain available throughout
+- `validation.jiraTransition.status` is set to `not_run`
+
+**Follow-up pass (bridge-spawned after gate clears):**
+- Triggered automatically by the bridge after `sqlChecks.status === 'pass'`
+- A second Claude session resumes the same conversation with Jira writes enabled
+- Posts comment + transitions to In Progress
+- Result appears as a `Jira Transition` card in the Activity Feed
+
+If the follow-up pass fails or is skipped, a `Jira Update Skipped` error card is added to the feed.
+
+### 7.3 Strict Validation Gate
+
+The bridge enforces: **SQL is only delivered to the UI if `validation.sqlChecks.status === 'pass'`**.
+
+- Set `SQL_CURATOR_REQUIRE_DRYRUN_PASS=false` to disable (dev/testing only)
+- If the gate blocks, the run is reported as failed and the Activity Feed shows the dry-run error cards
+- Claude is instructed to diagnose and retry dry-run failures up to 3 times before failing
+
+### 7.4 Stage Regression Guard
+
+The Zustand `setStage` action refuses to move the pipeline tracker backwards. Stray tool-pair events that would re-activate an already-completed stage are dropped silently. This prevents the "Intake running" issue where late-arriving tool calls mapped to intake would reset the visible stage after the pipeline had already advanced to validation.
+
+---
+
+## 9. Troubleshooting
 
 ### 7.1 Claude CLI Not Found
 
@@ -520,20 +584,20 @@ curl -X DELETE http://127.0.0.1:3001/session/YOUR_SESSION_ID
 
 ---
 
-## 8. Service Management
+## 10. Service Management
 
 ### 8.1 Running as Systemd Services (Linux)
 
 **claude-bridge.service:**
 ```ini
 [Unit]
-Description=SQLForge Claude Bridge
+Description=SQL Curator Claude Bridge
 After=network.target
 
 [Service]
 Type=simple
 User=your-user
-WorkingDirectory=/path/to/sqlforge/mini-services/claude-bridge
+WorkingDirectory=/path/to/sql-curator/mini-services/claude-bridge
 ExecStart=/usr/bin/node index.js
 Environment=BRIDGE_PORT=3001
 Environment=CLAUDE_MAX_CONCURRENT=3
@@ -570,16 +634,16 @@ CMD ["node", "index.js"]
 ```
 
 ```bash
-docker build -f Dockerfile.bridge -t sqlforge-bridge .
+docker build -f Dockerfile.bridge -t sql-curator-bridge .
 docker run -d -p 3001:3001 \
   -v ~/.claude.json:/root/.claude.json:ro \
   -e CLAUDE_MAX_CONCURRENT=3 \
-  sqlforge-bridge
+  sql-curator-bridge
 ```
 
 ---
 
-## 9. Security Considerations
+## 11. Security Considerations
 
 ### 9.1 Authentication
 
@@ -601,12 +665,12 @@ docker run -d -p 3001:3001 \
 
 ---
 
-## 10. File Reference
+## 12. File Reference
 
 ### 10.1 Project Structure
 
 ```
-sqlforge/
+sql-curator/
 ├── .env.example                          # Environment variable template
 ├── claude-bridge.js                      # Legacy root-level bridge (deprecated)
 ├── mini-services/
@@ -665,7 +729,7 @@ sqlforge/
 
 ---
 
-## 11. Testing Guide
+## 13. Testing Guide
 
 ### 11.1 End-to-End Test
 
@@ -699,7 +763,7 @@ sqlforge/
 
 ---
 
-## 12. Claude CLI Reference
+## 14. Claude CLI Reference
 
 ### 12.1 Key Flags Used
 

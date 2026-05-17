@@ -4,7 +4,7 @@
 // ============================================================
 
 // Task types
-export type TaskType = 'auto_detect' | 'sql_generation' | 'legacy_sql_conversion';
+export type TaskType = 'auto_detect' | 'sql_generation' | 'legacy_sql_conversion' | 'github_deploy';
 
 // Workflow pipeline stages
 export type WorkflowStage =
@@ -32,6 +32,7 @@ export interface UploadedFile {
   size: number;
   type: string;
   uploadedAt: string;
+  content?: string; // text content for .txt, .csv, .md, .sql files
 }
 
 // Jira input data
@@ -40,9 +41,10 @@ export interface JiraInput {
   storyNumber: string;
 }
 
-// BigQuery project input
+// BigQuery target scope input
 export interface BqProjectInput {
   projectId: string;
+  datasetId: string;
 }
 
 // SQL output with metadata
@@ -60,21 +62,72 @@ export interface DetectedTaskInfo {
   reasoning: string;
 }
 
-// Tool execution log (visible in chat)
-export interface ToolCallLog {
-  id: string;
-  tool: string;
-  args: Record<string, unknown>;
-  status: 'running' | 'success' | 'error';
-  summary?: string;
-  timestamp: string;
-}
-
 // Clarification prompt (when Claude needs more info from user)
 export interface ClarificationRequest {
   message: string;
+  explanation?: string;
+  details?: string;
+  options?: string[];
+  allowFreeText?: boolean;
   needsInput: boolean;
   timestamp?: number;
+}
+
+// One entry in the per-session clarification history. Captures the question
+// Claude asked AND the answer the architect supplied, so the entire dialog
+// stays visible in the SQL Curator Assistant pane.
+export interface ClarificationHistoryEntry {
+  id: string;
+  message: string;
+  explanation?: string;
+  details?: string;
+  options?: string[];
+  allowFreeText?: boolean;
+  askedAt: number;
+  selectedOptions?: string[];
+  freeText?: string;
+  answeredAt?: number;
+}
+
+export type StageStatus = 'active' | 'completed' | 'blocked' | 'failed';
+
+export type AgentActivityType =
+  | 'observation'
+  | 'inference'
+  | 'decision'
+  | 'validation'
+  | 'error'
+  | 'artifact';
+
+export type AgentActivityStatus =
+  | 'running'
+  | 'completed'
+  | 'warning'
+  | 'failed'
+  | 'blocked'
+  | 'pending';
+
+export type AgentActivitySource =
+  | 'claude'
+  | 'bridge'
+  | 'jira'
+  | 'bigquery'
+  | 'github'
+  | 'offline'
+  | 'fallback';
+
+export interface AgentActivityEvent {
+  id?: string;
+  stage: WorkflowStage;
+  type: AgentActivityType;
+  status: AgentActivityStatus;
+  title: string;
+  summary: string;
+  details?: string[];
+  confidence?: number;
+  evidence?: string[];
+  timestamp: number;
+  source: AgentActivitySource;
 }
 
 // Bidirectional interaction state
@@ -108,6 +161,27 @@ export interface StmArtifact {
   source: 'jira' | 'file' | 'text' | 'legacy_sql';
   jiraRef?: string;
   bqProject: string;
+  bqDataset?: string;
   generatedAt: string;
   version: number;
+}
+
+export type ValidationStatus = 'pass' | 'warning' | 'fail' | 'not_run';
+
+export interface ValidationSection {
+  status: ValidationStatus;
+  summary: string;
+  checks: string[];
+}
+
+export interface ValidationSummary {
+  activityLog?: AgentActivityEvent[];
+  activityDetails?: string[];
+  requirementCoverage: ValidationSection;
+  stmCompleteness: ValidationSection;
+  schemaReconciliation: ValidationSection;
+  sqlChecks: ValidationSection;
+  jiraTransition: ValidationSection;
+  inferences?: string[];
+  generatedAt: string;
 }

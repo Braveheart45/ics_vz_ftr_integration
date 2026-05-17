@@ -44,12 +44,14 @@
 }
 
 /* ================================================================
-   GCP Blue Minimalist Palette — SQLForge
+   GCP Blue Minimalist Palette — SQL Curator
    Warm neutral base · GCP Blue primary accent
    ================================================================ */
 
 :root {
   --radius: 0.625rem;
+  --font-geist-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+  --font-geist-mono: "SFMono-Regular", "Cascadia Code", "Roboto Mono", Consolas, "Liberation Mono", monospace;
 
   /* Base — warm off-white */
   --background: oklch(0.995 0.002 75);
@@ -142,8 +144,37 @@
     @apply border-border outline-ring/50;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground font-sans;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    text-rendering: optimizeLegibility;
   }
+}
+
+/* Scoped readability bump for the SQL Curator shell. */
+.sql-curator-app .text-\[9px\] {
+  font-size: 10px;
+}
+
+.sql-curator-app .text-\[10px\] {
+  font-size: 11px;
+}
+
+.sql-curator-app .text-\[10\.5px\] {
+  font-size: 12px;
+}
+
+.sql-curator-app .text-\[11px\] {
+  font-size: 12px;
+}
+
+.sql-curator-app .text-xs {
+  font-size: 13px;
+  line-height: 1.2rem;
+}
+
+.sql-curator-app .text-sm {
+  font-size: 14.5px;
+  line-height: 1.35rem;
 }
 
 /* ================================================================
@@ -269,5 +300,3 @@
   scrollbar-width: thin;
   scrollbar-color: oklch(0.78 0.01 60) transparent;
 }
-
-

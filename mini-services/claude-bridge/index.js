@@ -5,7 +5,7 @@
 //
 // A local HTTP proxy that spawns `claude` CLI with
 // --output-format stream-json, converts JSON-Lines output
-// to Server-Sent Events compatible with the SQLForge frontend.
+// to Server-Sent Events compatible with the SQL Curator frontend.
 //
 // Architecture:
 //   Browser → Next.js /api/chat → claude-bridge (port 3001)
@@ -21,7 +21,7 @@
 //
 // The claude CLI MUST have MCP servers configured in
 // ~/.claude.json for this bridge to access Jira, BigQuery,
-// and GitHub tools.
+// BigQuery, and GitHub tools.
 // ============================================================
 
 'use strict';
@@ -35,10 +35,52 @@ const path = require('path');
 // ── Configuration ─────────────────────────────────────────────
 
 const PORT = parseInt(process.env.BRIDGE_PORT || '3001', 10);
-const CLAUDE_MAX_TURNS = parseInt(process.env.CLAUDE_MAX_TURNS || '15', 10);
-const CLAUDE_TIMEOUT_MS = parseInt(process.env.CLAUDE_TIMEOUT_MS || '180000', 10);
+const CLAUDE_MAX_TURNS = parseInt(process.env.CLAUDE_MAX_TURNS || '25', 10);
+const CLAUDE_TIMEOUT_MS = parseInt(process.env.CLAUDE_TIMEOUT_MS || '1200000', 10);
 const MAX_HISTORY_MESSAGES = parseInt(process.env.MAX_HISTORY_MESSAGES || '20', 10);
 const MAX_CONCURRENT = parseInt(process.env.CLAUDE_MAX_CONCURRENT || '3', 10);
+const MAX_REQUEST_BODY_BYTES = parseInt(process.env.SQL_CURATOR_MAX_REQUEST_BODY_BYTES || String(2 * 1024 * 1024), 10);
+const OFFLINE_DRY_RUN_ENABLED = process.env.SQL_CURATOR_ENABLE_OFFLINE_DRY_RUN === 'true';
+// Strict gate: refuse to surface generated SQL unless Claude's structured
+// validation.sqlChecks.status is exactly 'pass'. Defaults to enabled.
+// Disable with SQL_CURATOR_REQUIRE_DRYRUN_PASS=false for development only.
+const REQUIRE_SQLCHECKS_PASS = process.env.SQL_CURATOR_REQUIRE_DRYRUN_PASS !== 'false';
+// Two-pass Jira ordering. During the main run we block the Jira write tools
+// so Claude cannot post the comment or transition the issue before validation
+// completes. After the strict gate passes, the bridge spawns a focused
+// follow-up Claude session that resumes the same conversation with these
+// tools allowed and instructs Claude to perform ONLY the Jira completion.
+const DEFAULT_JIRA_WRITE_TOOLS = [
+  'mcp__claude_ai_Atlassian_Rovo__addCommentToJiraIssue',
+  'mcp__claude_ai_Atlassian_Rovo__addWorklogToJiraIssue',
+  'mcp__claude_ai_Atlassian_Rovo__transitionJiraIssue',
+  'mcp__claude_ai_Atlassian_Rovo__editJiraIssue',
+  'mcp__claude_ai_Atlassian_Rovo__createJiraIssue',
+  'mcp__claude_ai_Atlassian_Rovo__createIssueLink',
+];
+const JIRA_WRITE_TOOLS = (process.env.SQL_CURATOR_JIRA_WRITE_TOOLS || '').trim()
+  ? process.env.SQL_CURATOR_JIRA_WRITE_TOOLS.split(',').map((t) => t.trim()).filter(Boolean)
+  : DEFAULT_JIRA_WRITE_TOOLS;
+const JIRA_COMPLETION_ENABLED = process.env.SQL_CURATOR_DEFER_JIRA_COMPLETION !== 'false';
+const JIRA_COMPLETION_TIMEOUT_MS = parseInt(process.env.SQL_CURATOR_JIRA_COMPLETION_TIMEOUT_MS || '120000', 10);
+const BQ_PROJECT_ID_PATTERN = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
+const BQ_DATASET_ID_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,1023}$/;
+
+function validateTargetScope(bqProjectId, bqDatasetId) {
+  if (!bqProjectId || typeof bqProjectId !== 'string' || !bqProjectId.trim()) {
+    return 'Target BigQuery Project ID is required';
+  }
+  if (!BQ_PROJECT_ID_PATTERN.test(bqProjectId.trim())) {
+    return 'Target BigQuery Project ID must be a valid Google Cloud project ID';
+  }
+  if (!bqDatasetId || typeof bqDatasetId !== 'string' || !bqDatasetId.trim()) {
+    return 'Target BigQuery Dataset ID is required';
+  }
+  if (!BQ_DATASET_ID_PATTERN.test(bqDatasetId.trim())) {
+    return 'Target BigQuery Dataset ID must contain only letters, numbers, and underscores and cannot start with a number';
+  }
+  return null;
+}
 
 // ── In-memory session store ───────────────────────────────────
 // Maps sessionId → { messages: [...], conversationId: string | null, lastActivity: Date }
@@ -51,9 +93,16 @@ function getSession(sessionId) {
       messages: [],
       conversationId: null, // Claude's --resume conversation ID
       lastActivity: Date.now(),
+      stmVersion: 0,
     });
   }
   return sessions.get(sessionId);
+}
+
+function nextStmVersion(sessionId) {
+  const session = getSession(sessionId);
+  session.stmVersion = (session.stmVersion || 0) + 1;
+  return session.stmVersion;
 }
 
 function trimSession(sessionId) {
@@ -74,29 +123,11 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000);
 
-// ── Project Discovery Cache ─────────────────────────────────
-// Cache discovery results to avoid spamming Claude CLI on every dropdown open
-const projectCache = {
-  jira: { data: null, timestamp: 0, ttl: 5 * 60 * 1000 },  // 5 min TTL
-  bq:   { data: null, timestamp: 0, ttl: 5 * 60 * 1000 },
-};
-
-function getCachedProjects(type) {
-  const cache = projectCache[type];
-  if (cache.data && Date.now() - cache.timestamp < cache.ttl) {
-    return cache.data;
-  }
-  return null;
-}
-
-function setCachedProjects(type, data) {
-  projectCache[type].data = data;
-  projectCache[type].timestamp = Date.now();
-}
-
-// ── Active request tracking (for concurrency limits) ──────────
-
+// Active request tracking for concurrency limits
 let activeRequests = 0;
+
+// ── Spawned process registry (for clean shutdown) ─────────────
+const spawnedProcs = new Set();
 
 // ── Claude CLI availability check ─────────────────────────────
 
@@ -108,7 +139,10 @@ function findClaude() {
   const candidates = ['claude', 'claude-code'];
   for (const cmd of candidates) {
     try {
-      const result = spawnSync(cmd, ['--version'], {
+      // Pass the full command as a single string when shell:true to avoid
+      // Node 22 DEP0190 (mixing args array with shell:true is deprecated).
+      // The cmd values here are hardcoded literals, so interpolation is safe.
+      const result = spawnSync(`${cmd} --version`, {
         timeout: 5000,
         shell: true,
       });
@@ -140,38 +174,157 @@ function findClaude() {
 
 // ── Prompt Builder ────────────────────────────────────────────
 
-function buildPrompt(request) {
-  const { messages, taskType, jiraInput, bqProjectId, contextText } = request;
-  const parts = [];
+function loadSqlForgeSkill() {
+  const skillPath = path.resolve(__dirname, '..', '..', 'skills', 'sqlforge', 'SKILL.md');
+  try {
+    return fs.readFileSync(skillPath, 'utf8').trim();
+  } catch (err) {
+    console.error(`  [skill] Unable to load SQL Curator skill: ${err.message}`);
+    return '';
+  }
+}
 
-  // System identity
-  parts.push('You are SQLForge, an AI-powered SQL Generation and Legacy SQL Conversion Agent for Google BigQuery.');
+function buildThinShellPrompt(request) {
+  const { messages, taskType, jiraInput, bqProjectId, bqDatasetId, contextText } = request;
+  const sqlForgeSkill = loadSqlForgeSkill();
+  const targetProject = String(bqProjectId || '').trim();
+  const targetDataset = String(bqDatasetId || '').trim();
 
-  // Task type instruction
-  const taskInstructions = {
-    sql_generation: '## Task Type\nGenerate NEW BigQuery-compatible SQL based on the requirements.',
-    legacy_sql_conversion: '## Task Type\nConvert legacy SQL (T-SQL, PL/SQL, Redshift, Teradata) to BigQuery syntax.',
-    auto_detect: '## Task Type\nInfer whether to generate new SQL or convert legacy SQL. Analyze the input carefully.',
-  };
+  const instructions = `# SQL Curator — Claude Code Workflow Engine
 
-  parts.push(taskInstructions[taskType] || taskInstructions.auto_detect);
+You are the complete workflow engine for a minimalist SQL generation UI. The UI is only a presentation layer: it collects input, sends it here, renders your status/questions/final SQL, and must not make business or workflow decisions.
 
-  // BQ project
-  if (bqProjectId) {
-    parts.push(`## Target BigQuery Project\n\`${bqProjectId}\`\n\nUse your MCP BigQuery tool to explore schemas in this project before writing SQL.`);
+## SQL Curator Skill Contract
+Follow the SQL Curator skill instructions below as the stable operating contract for this request. If anything in the skill conflicts with the hard constraints in this prompt, the hard constraints win.
+
+${sqlForgeSkill || 'SQL Curator skill file was not available; use the hard constraints and workflow rules in this prompt.'}
+
+## Hard Constraints
+- The UI and Next.js routes must use zero external APIs and must not contain business workflow logic.
+- Claude Code owns all workflow decisions and must use the enabled native Jira and BigQuery MCP connectors when Jira or BigQuery lookup is needed.
+- Claude Code must use the enabled native GitHub MCP connector when the requested mode is GitHub deployment.
+- Do not build or assume custom MCP connectors for this POC.
+- Do not execute mutating SQL. Read-only metadata inspection and dry runs are allowed only inside Claude Code when required for schema reconciliation or validation.
+- Treat uploaded files and free text as direct local context.
+- Supported uploaded file context is plain text only: TXT, CSV, JSON, MD, and SQL. Do not assume PDF, DOCX, XLSX, or PPTX extraction exists in this POC.
+- The BigQuery project ID and dataset ID are mandatory. Treat them as the target BigQuery scope for generated object names, schema reconciliation, inference, and dry-run validation.
+- Do not infer, scan, or reconcile schemas outside the mandatory target dataset. If needed details are absent from that dataset, ask a focused clarification instead of crawling other datasets.
+- If a Jira reference is supplied, fetch the story details with the native Jira MCP connector and merge the story description, acceptance criteria, comments, and relevant linked context into the session context before deciding whether to generate or clarify.
+- After SQL is generated successfully for a supplied Jira story, use the native Jira MCP connector to post a Jira comment and transition that Jira issue to In Progress. The comment must summarize SQL generation, STM status, validation result, dry-run result when available, output artifact summary, assumptions, and unresolved warnings. If either Jira action is unavailable, include the exact failure as validation feedback instead of failing SQL generation.
+- If Jira fetching fails or the connector is unavailable, ask the user to provide the story details instead of guessing.
+- Do not deploy to GitHub during SQL generation. GitHub deployment is allowed only when Requested Mode is github_deploy, which is triggered by the user's deployment icon action.
+- Emit concise visible activity checkpoints as you work: what you fetched, analyzed, investigated, inferred, assumed, validated, dry-run errors/fixes, and Jira/GitHub actions. Do not expose private chain-of-thought; provide architect-readable rationale, findings, and decisions.
+
+## Workflow You Own
+1. Intake and consolidate every supplied source into one requirement context.
+2. Identify the target use case: generate SQL, convert SQL, or clarify requirement.
+3. Detect schema, mappings, business logic, target tables, joins, filters, and transformation rules from the provided context.
+4. If context is sufficient, generate production-oriented BigQuery SQL immediately.
+5. Validate the generated SQL against only the supplied source inputs: mapping completeness, stated business rules, obvious schema/logic gaps, and syntax-level reasonableness.
+6. Infer missing non-critical details when confidence is 90% or higher.
+7. If confidence is below 90% for a critical detail, ask one focused clarification and stop.
+8. After a clarification answer, resume from the unresolved stage only. Do not restart at Intake unless the original context is invalid or missing.
+9. If the user selects one of your clarification options or explicitly approves a proposed mapping, treat that answer as authorization to continue with that mapping. Do not ask the same clarification again. Continue to STM construction, SQL generation, dry-run validation when possible, and return warnings for any remaining low-confidence business semantics.
+
+## GitHub Deployment Mode
+When Requested Mode is github_deploy:
+- Treat the provided generated SQL and STM artifact as the source of truth.
+- Use the native GitHub MCP connector only. Do not use custom GitHub APIs from the UI.
+- Determine repository, branch, file path, and PR/commit expectation from the supplied context, Jira story, or conversation history.
+- If repository, branch, or destination path cannot be inferred with at least 90% confidence, return a clarification using the required clarification JSON format.
+- If sufficient, push or create the requested GitHub change through Claude Code and return a concise deployment summary.
+- Do not modify SQL business logic during deployment unless the user explicitly requests it.
+
+## Schema Reconciliation Policy
+- If target project ID, target dataset ID, table names, column names, and join/filter rules are explicit and internally consistent, do not infer or inspect unrelated schema. Proceed directly to SQL generation and validation.
+- The supplied target dataset is the hard boundary for BigQuery investigation. Use native BigQuery MCP only to inspect tables/views/columns inside that dataset.
+- If schema details are implicit, missing, or ambiguous, derive scoped search terms from the intake context first: business domain, target subject area, entities, table prefixes, mapping names, Jira keywords, uploaded file headings, and free-text nouns, then apply those terms only inside the target dataset.
+- Do not list, crawl, or reconcile all datasets in the project. Do not search other datasets for alternatives unless the user explicitly changes the target dataset.
+- Prefer exact or near-exact table candidates named in the intake within the target dataset. If multiple meaningful candidates remain within that dataset, ask the user to choose.
+- If meaningful candidates cannot be inferred within the target dataset, ask a direct clarification question and request table/column context or a corrected dataset from the user.
+- Clarification must include selectable options when candidates exist, plus a free-text path for more context. If no candidates exist, ask the question directly and use the free-text path only.
+
+## Pipeline Stages
+Use this progression conceptually: Intake -> Analyze -> Schema -> Generate -> Validate -> Ready.
+Never reset from Schema or Generate back to Intake unless the input payload is incomplete or corrupted.
+
+## Clarification Format
+When information is required, end with [CLARIFY] and include this exact fenced JSON block:
+\`\`\`clarification
+{"explanation":"Short reason the workflow is blocked","details":"Investigation findings, candidates, rationale, confidence, and checkpoint text for SQL Curator Assistant","question":"Focused question","options":["Option A","Option B"],"allowFreeText":true}
+\`\`\`
+Use 2-5 options whenever possible. Ask no vague open-ended question unless options are impossible. Put BigQuery investigation findings and confirmation context in details so the Assistant pane can show the user exactly what Claude found before they answer.
+
+## Final Output Format
+When SQL is ready, include:
+1. A concise validation summary.
+2. Optional assumptions made during inference.
+3. Jira comment and transition feedback when a Jira story was supplied, including whether a comment was posted and whether the story was moved to In Progress.
+4. The generated SQL in a single \`\`\`sql fenced block.
+5. A required STM artifact in a \`\`\`stm fenced JSON block using:
+{"title":"STM Title","description":"Brief description","rows":[{"sourceField":"field_name","sourceTable":"table_name","sourceType":"data_type","targetColumn":"column_name","targetTable":"table_name","targetType":"data_type","transformation":"TRANSFORM","businessRule":"RULE","notes":"NOTE"}]}
+6. A required validation artifact in a \`\`\`validation fenced JSON block using:
+{"activityLog":[{"stage":"analysis","type":"observation","status":"completed","title":"Intake classified","summary":"What Claude observed or decided","details":["Optional extra detail"],"confidence":95,"evidence":["Optional evidence"],"timestamp":0,"source":"claude"}],"activityDetails":["Summarize what Claude fetched, analyzed, found, reconciled, inferred, assumed, validated, and updated."],"inferences":["List each material inference or auto-approved assumption used for STM/SQL generation, including confidence when useful. If none, say no material inference was required."],"requirementCoverage":{"status":"pass","summary":"What requirement coverage was validated","checks":["Concrete check"]},"stmCompleteness":{"status":"pass","summary":"What STM completeness was validated","checks":["Concrete check"]},"schemaReconciliation":{"status":"pass","summary":"What schema reconciliation was validated","checks":["Concrete check"]},"sqlChecks":{"status":"pass","summary":"What SQL checks were validated","checks":["Concrete check"]},"jiraTransition":{"status":"pass","summary":"Jira comment and transition result, or reason not applicable","checks":["Jira comment posted or failure reason","Jira transition result or failure reason"]}}
+Use status values only from pass, warning, fail, and not_run.
+For activityLog status use only running, completed, warning, failed, blocked, or pending. For activityLog type use only observation, inference, decision, validation, error, or artifact. NEVER use type "tool" — tool invocations are not user-facing; describe what was learned from a tool result, not that a tool was called. For activityLog source use only claude, bridge, jira, bigquery, github, offline, or fallback.
+
+LIVE ACTIVITY FEED — INLINE BLOCKS REQUIRED
+The Activity pane streams from inline \`\`\`activity blocks you emit during the run. The bridge scans your streaming text for these blocks and forwards each as an SSE event the moment its closing fence arrives. If you only emit findings in the final validation block, the user sees nothing happening until the end. Stream them as you go.
+
+Required inline format — emit one of these after each significant step (intake, analysis findings, schema decisions, STM completion, dry-run attempts, dry-run fixes, Jira actions). One JSON object per block, blank line before and after, on its own lines:
+
+\`\`\`activity
+{"stage":"analysis","type":"observation","status":"completed","title":"Fetched SCRUM-21","summary":"Top 3 customers by total broadband usage for a specified month.","evidence":["Jira description excerpt","AC3: filter for a specific month"],"source":"jira"}
+\`\`\`
+
+Hard requirements:
+- At least one inline activity block at the close of each stage you actually executed (intake, analysis, schema_resolution, sql_generation, validation, ready).
+- Within a stage, additional blocks for material findings, inferences, decisions, validations, dry-run attempts, fixes, retries, and unresolved errors.
+- Each entry states the FINDING, not the action. Bad: "Called getJiraIssue." Good: "SCRUM-21 acceptance criteria require top-N ranking, monthly grain, total broadband usage = downlink+uplink."
+- type "inference" and type "decision" entries MUST include evidence[].
+- type "error" entries state the diagnosis and what was done about it (fix, retry, surfaced for clarification).
+- Do not narrate the same finding twice; the bridge dedupes by raw JSON payload.
+- Do not echo the SQL or STM in the activity log.
+- Forbidden phrases in title/summary: "Calling", "Invoking", "Tool", "MCP", "Running tool", "Fetching via", "BigQuery MCP", "Jira MCP".
+- The final validation.activityLog[] field is now optional. If present, it should be a deduplicated summary only.
+
+STRICT JIRA STEP ORDERING (Jira-backed runs only) — TOOL-GATED
+The bridge enforces ordering at the tool level. During THIS main pass the Jira WRITE tools are disallowed: addCommentToJiraIssue, transitionJiraIssue, editJiraIssue, createJiraIssue, addWorklogToJiraIssue, createIssueLink. They will not appear in your toolset and will fail if attempted. Do not try to call them. Jira READ tools (getJiraIssue, searchJiraIssuesUsingJql) remain available.
+
+After your main pass produces SQL/STM/validation and the strict gate passes (sqlChecks.status === "pass"), the bridge spawns a follow-up Claude pass that resumes this same conversation with Jira write tools re-enabled. That follow-up will post the comment and transition the issue automatically.
+
+Your main pass sequence:
+1. Intake: fetch Jira story (read). Emit activity block.
+2. Analyze: extract acceptance criteria. Emit activity blocks.
+3. Schema: reconcile within target dataset. Emit activity blocks.
+4. Generate: build STM, write SQL. Emit activity blocks.
+5. Validate: run BigQuery dry run, retry up to 3x on failure. Emit one activity block per attempt + fix.
+6. Ready: emit ready activity block, then final SQL/STM/validation fenced blocks, then [SQL_READY].
+
+In the validation JSON block, set jiraTransition.status to "not_run" with summary "Deferred to bridge follow-up pass after gate clears." — the bridge's follow-up will overwrite the user-facing result with the real outcome.
+
+Activity details must include dry-run attempts, dry-run errors, diagnosis, fixes applied, retry outcomes, and unresolved failures whenever those occur.
+
+STRICT GATE: The bridge withholds generated SQL from the UI unless validation.sqlChecks.status is exactly "pass". If you emit [SQL_READY] with sqlChecks.status set to warning/fail/not_run, the user sees the run as failed and no SQL is released. Always run a BigQuery dry run (and the diagnose-fix-retry loop up to 3 times) before declaring readiness. If a dry run is impossible (no MCP, permission denied), set sqlChecks.status to "warning" and surface a clarification rather than emitting [SQL_READY].
+7. End with [SQL_READY].
+
+## BigQuery SQL Rules
+Generate BigQuery SQL with appropriate source tables, target object, column mappings, joins, filters, aggregations, business rules, null handling, casting, date logic, aliases, and useful comments. Prefer CTEs, SAFE_DIVIDE, COUNTIF, QUALIFY for window filters, COALESCE/IFNULL for nullable inputs, and clear aliases.`;
+
+  const parts = [instructions];
+  parts.push(`## Requested Mode\n${taskType || 'auto_detect'}`);
+
+  if (jiraInput?.project || jiraInput?.storyNumber) {
+    const storyRef = [jiraInput.project, jiraInput.storyNumber].filter(Boolean).join('-');
+    parts.push(`## Jira Story Reference\n${storyRef || JSON.stringify(jiraInput)}\n\nFetch this Jira story using the enabled native Jira MCP connector. Add the fetched story details to the working context before requirement analysis. Do not use custom connectors.`);
   }
 
-  // Jira context
-  if (jiraInput?.project && jiraInput?.storyNumber) {
-    parts.push(`## Jira Story\nFetch and analyze Jira story **${jiraInput.project}-${jiraInput.storyNumber}** using your MCP Jira tool.\n\nExtract:\n- Business requirements\n- Acceptance criteria\n- Any technical constraints from comments`);
-  }
+  parts.push(`## Target BigQuery Scope\nProject ID: ${targetProject}\nDataset ID: ${targetDataset}\n\nThis target dataset is mandatory and is the hard boundary for BigQuery schema reconciliation, inference, generated object qualification, and dry-run validation. Inspect or infer only within \`${targetProject}.${targetDataset}\`. If the Jira story, file, or free text points to missing or ambiguous objects, ask for clarification instead of crawling other datasets.`);
 
-  // Context text
   if (contextText?.trim()) {
-    parts.push(`## Additional Context\n${contextText.trim()}`);
+    parts.push(`## Consolidated User Context\n${contextText.trim()}`);
   }
 
-  // Conversation history (most recent messages)
   if (messages && messages.length > 0) {
     const recent = messages.slice(-MAX_HISTORY_MESSAGES);
     parts.push('## Conversation History');
@@ -181,34 +334,33 @@ function buildPrompt(request) {
     }
   }
 
-  // Final instructions
-  parts.push(`## Instructions
-1. Use your MCP tools (Jira, BigQuery, GitHub) as needed to gather context.
-2. If you need clarification, ask a clear, specific question. Do NOT generate SQL if requirements are unclear.
-3. When requirements are clear, generate production-quality BigQuery SQL.
-4. Always include the SQL in a \`\`\`sql code block.
-5. Briefly explain your design decisions and any assumptions.
-6. If converting legacy SQL, show the original and then the converted version.
-7. End your response with: [SQL_READY] if SQL was generated, or [CLARIFY] if you need more information.
-8. IMPORTANT: After generating SQL, also produce a Source-to-Target Mapping (STM) artifact. Include it in a \`\`\`stm code block with this exact JSON format:
-\`\`\`stm
-{"title":"STM Title","description":"Brief description","rows":[{"sourceField":"field_name","sourceTable":"table_name","sourceType":"data_type","targetColumn":"column_name","targetTable":"table_name","targetType":"data_type","transformation":"TRANSFORM","businessRule":"RULE","notes":"NOTE"}]}
-\`\`\`
-Include every source field mapped to its target column, with the transformation logic and business rule for each mapping.`);
-
   return parts.join('\n\n---\n\n');
+}
+
+function buildPrompt(request) {
+  return buildThinShellPrompt(request);
 }
 
 // ── SQL Extraction ────────────────────────────────────────────
 
 function extractSql(content) {
-  const match = content.match(/```sql\s*\n([\s\S]*?)```/i);
-  return match ? match[1].trim() : null;
+  // Accept common BigQuery fence labels models actually emit.
+  const labeled = content.match(/```(?:sql|bigquery|bq|googlesql)\s*\n([\s\S]*?)```/i);
+  if (labeled) return labeled[1].trim();
+  // Fallback: bare fenced block whose body clearly looks like SQL.
+  const bare = content.match(/```\s*\n([\s\S]*?)```/);
+  if (bare) {
+    const body = bare[1];
+    if (/\b(SELECT|WITH|CREATE|INSERT|UPDATE|DELETE|MERGE)\b/i.test(body)) {
+      return body.trim();
+    }
+  }
+  return null;
 }
 
 // ── STM Extraction ────────────────────────────────────────────
 
-function extractStm(content, request) {
+function extractStm(content, request, sessionId) {
   const match = content.match(/```stm\s*\n([\s\S]*?)```/i);
   if (!match) return null;
 
@@ -238,8 +390,9 @@ function extractStm(content, request) {
       source,
       jiraRef: source === 'jira' ? `${request.jiraInput.project}-${request.jiraInput.storyNumber}` : undefined,
       bqProject: String(request.bqProjectId || ''),
+      bqDataset: String(request.bqDatasetId || ''),
       generatedAt: new Date().toISOString(),
-      version: 1,
+      version: nextStmVersion(sessionId),
     };
   } catch (err) {
     console.error(`  [stm] Failed to parse STM JSON: ${err.message}`);
@@ -247,38 +400,1058 @@ function extractStm(content, request) {
   }
 }
 
+function extractValidationSummary(content, request = {}) {
+  const hasSql = !!extractSql(content);
+  const hasStm = /```stm\s*\n[\s\S]*?```/i.test(content);
+  const hasJira = !!(request.jiraInput?.project || request.jiraInput?.storyNumber);
+  const jiraSignals = extractJiraSignals(content, hasJira);
+  const inferences = extractInferenceNotes(content);
+  const activityDetails = extractActivityDetails(content);
+
+  const validationMatch = content.match(/```validation\s*\n([\s\S]*?)```/i);
+  if (validationMatch) {
+    try {
+      return normalizeValidationSummary(JSON.parse(validationMatch[1].trim()), {
+        hasSql,
+        hasStm,
+        hasJira,
+        jiraSignals,
+        inferences,
+        activityDetails,
+      });
+    } catch (err) {
+      console.error(`  [validation] Failed to parse validation JSON: ${err.message}`);
+    }
+  }
+
+  const withoutSql = content
+    .replace(/```sql\s*\n[\s\S]*?```/gi, '')
+    .replace(/```stm\s*\n[\s\S]*?```/gi, '')
+    .replace(/```validation\s*\n[\s\S]*?```/gi, '')
+    .replace('[SQL_READY]', '')
+    .trim();
+
+  const lines = withoutSql
+    .split('\n')
+    .map((line) => line.replace(/^[-*]\s*/, '').trim())
+    .filter(Boolean)
+    .filter((line) => !line.startsWith('#'));
+
+  const detailLines = lines
+    .filter((line) => !/^validation summary:?$/i.test(line))
+    .slice(0, 8);
+
+  return normalizeValidationSummary({
+    requirementCoverage: {
+      status: hasSql ? 'pass' : 'warning',
+      summary: detailLines[0] || 'Requirements were reviewed against the generated SQL.',
+      checks: detailLines.length > 0 ? detailLines.slice(0, 3) : ['Generated SQL was compared with available requirement context.'],
+    },
+    stmCompleteness: {
+      status: hasStm ? 'pass' : 'warning',
+      summary: hasStm ? 'STM artifact was returned with the generated SQL.' : 'Structured STM artifact was not returned; using validation fallback.',
+      checks: [hasStm ? 'Fenced STM JSON block was detected.' : 'Claude should return a fenced stm JSON block with every generated SQL response.'],
+    },
+    schemaReconciliation: {
+      status: 'warning',
+      summary: 'Schema reconciliation details were not returned in structured form.',
+      checks: ['Bridge preserved Claude validation text as fallback.', 'Scoped schema evidence should be reviewed if ambiguity remains.'],
+    },
+    sqlChecks: {
+      status: hasSql ? 'pass' : 'warning',
+      summary: hasSql ? 'SQL fenced block was present and emitted to the UI.' : 'SQL block was not detected in Claude output.',
+      checks: hasSql
+        ? ['SQL block was extracted successfully.', 'Validation stage completed after SQL generation.']
+        : ['Claude should return generated SQL in a fenced sql block.'],
+    },
+    jiraTransition: {
+      status: jiraSignals.status,
+      summary: jiraSignals.summary,
+      checks: jiraSignals.checks,
+    },
+    generatedAt: new Date().toISOString(),
+  }, {
+    hasSql,
+    hasStm,
+    hasJira,
+    jiraSignals,
+    inferences,
+    activityDetails,
+  });
+}
+
+function detectTerminalRunIssue(content) {
+  const text = String(content || '');
+  if (/hit your limit|usage limit|rate limit|resets?\s+\d|quota/i.test(text)) {
+    const limitLine = text
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => /hit your limit|usage limit|rate limit|resets?\s+\d|quota/i.test(line));
+    return {
+      kind: 'claude_limit',
+      message: limitLine || 'Claude Code hit a usage or rate limit before returning SQL.',
+      hint: 'Retry after the Claude Code limit resets; the workflow state and prior clarification can be reused.',
+    };
+  }
+
+  return {
+    kind: 'missing_sql',
+    message: 'Claude Code completed but did not return a fenced SQL block.',
+    hint: 'Ask Claude to retry generation or provide the missing context requested in the activity output.',
+  };
+}
+
+function buildTerminalFailureValidationSummary(content, request = {}, issue = detectTerminalRunIssue(content)) {
+  const base = extractValidationSummary(content, request);
+  const details = [
+    issue.message,
+    ...(base.activityDetails || []),
+  ].filter(Boolean);
+
+  const schemaChecks = details.filter((line) => /schema|dataset|table|column|BigQuery|dry run|dry-run|dryrun/i.test(line)).slice(0, 6);
+  const sqlChecks = details.filter((line) => /sql|dry run|dry-run|dryrun|error|failed|limit|quota|missing/i.test(line)).slice(0, 6);
+
+  return normalizeValidationSummary({
+    ...base,
+    activityDetails: details,
+    requirementCoverage: {
+      status: base.requirementCoverage?.status || 'warning',
+      summary: base.requirementCoverage?.summary || 'Requirement analysis started but the run ended before SQL was returned.',
+      checks: base.requirementCoverage?.checks || ['Review the Activity Summary for the last completed workflow step.'],
+    },
+    stmCompleteness: {
+      status: 'warning',
+      summary: 'STM artifact was not returned before the run stopped.',
+      checks: ['Claude Code must return fenced STM JSON after successful SQL generation.'],
+    },
+    schemaReconciliation: {
+      status: schemaChecks.length ? 'warning' : base.schemaReconciliation?.status || 'warning',
+      summary: schemaChecks.length
+        ? 'Schema reconciliation or dry-run activity occurred before the run stopped.'
+        : base.schemaReconciliation?.summary || 'Schema reconciliation result was not fully returned.',
+      checks: schemaChecks.length ? schemaChecks : base.schemaReconciliation?.checks || ['No structured schema reconciliation result was returned.'],
+    },
+    sqlChecks: {
+      status: 'fail',
+      summary: issue.message,
+      checks: sqlChecks.length ? sqlChecks : [issue.hint],
+    },
+    jiraTransition: {
+      status: request.jiraInput?.project || request.jiraInput?.storyNumber ? 'warning' : 'not_run',
+      summary: request.jiraInput?.project || request.jiraInput?.storyNumber
+        ? 'Jira comment and transition were not completed because SQL generation did not finish.'
+        : 'No Jira story was supplied for transition.',
+      checks: request.jiraInput?.project || request.jiraInput?.storyNumber
+        ? ['Jira update is attempted only after SQL generation and validation complete.', issue.message]
+        : ['Jira transition was not applicable.'],
+    },
+  }, {
+    hasSql: false,
+    hasStm: false,
+    hasJira: !!(request.jiraInput?.project || request.jiraInput?.storyNumber),
+    jiraSignals: extractJiraSignals(content, !!(request.jiraInput?.project || request.jiraInput?.storyNumber)),
+    inferences: base.inferences || extractInferenceNotes(content),
+    activityDetails: details,
+  });
+}
+
+function extractInferenceNotes(content) {
+  const withoutBlocks = String(content || '')
+    .replace(/```sql\s*\n[\s\S]*?```/gi, '')
+    .replace(/```stm\s*\n[\s\S]*?```/gi, '')
+    .replace(/```validation\s*\n[\s\S]*?```/gi, '')
+    .replace(/```clarification\s*\n[\s\S]*?```/gi, '')
+    .replace(/```activity\s*\n[\s\S]*?```/gi, '');
+
+  const inferenceLines = withoutBlocks
+    .split('\n')
+    .map((line) => line.replace(/^[-*|#\s]+/, '').trim())
+    .filter(Boolean)
+    .filter((line) => /assum|infer|confidence|auto-approved|propos|candidate|rationale|decision/i.test(line))
+    .filter((line) => line.length <= 260)
+    .slice(0, 8);
+
+  return Array.from(new Set(inferenceLines));
+}
+
+function extractActivityDetails(content) {
+  const clarificationDetails = [];
+  const clarificationMatch = String(content || '').match(/```clarification\s*\n([\s\S]*?)```/i);
+  if (clarificationMatch) {
+    try {
+      const parsed = JSON.parse(clarificationMatch[1].trim());
+      if (parsed.details) clarificationDetails.push(...String(parsed.details).split('\n'));
+      if (parsed.explanation) clarificationDetails.push(String(parsed.explanation));
+    } catch {
+      // Keep fallback extraction below.
+    }
+  }
+
+  const withoutBlocks = String(content || '')
+    .replace(/```sql\s*\n[\s\S]*?```/gi, '')
+    .replace(/```stm\s*\n[\s\S]*?```/gi, '')
+    .replace(/```validation\s*\n[\s\S]*?```/gi, '')
+    .replace(/```clarification\s*\n([\s\S]*?)```/gi, '')
+    .replace(/```activity\s*\n[\s\S]*?```/gi, '')
+    .replace(/\[SQL_READY\]|\[CLARIFY\]/g, '');
+
+  const lines = [...clarificationDetails, ...withoutBlocks.split('\n')]
+    .map((line) => line.replace(/^[-*|#\s]+/, '').trim())
+    .filter(Boolean)
+    .filter((line) => !/^[-:]+$/.test(line))
+    .filter((line) => line.length >= 12 && line.length <= 320)
+    .filter((line) => /S\d+|finding|found|validated|verified|inferred|assumed|candidate|confidence|coverage|schema|dataset|table|column|jira|dry run|dry-run|dryrun|transition|comment|stm|sql|error|failed|failure|fix|fixed|auto-fix|resolved|retry|rerun/i.test(line))
+    .slice(0, 40);
+
+  return Array.from(new Set(lines));
+}
+
+function extractJiraSignals(content, hasJira) {
+  if (!hasJira) {
+    return {
+      status: 'not_run',
+      summary: 'No Jira story was supplied for comment or transition.',
+      checks: ['Jira comment and transition were not applicable.'],
+    };
+  }
+
+  const lines = String(content || '')
+    .replace(/```sql\s*\n[\s\S]*?```/gi, '')
+    .replace(/```stm\s*\n[\s\S]*?```/gi, '')
+    .replace(/```validation\s*\n[\s\S]*?```/gi, '')
+    .split('\n')
+    .map((line) => line.replace(/^[-*|]\s*/, '').trim())
+    .filter(Boolean);
+
+  const commentLines = lines.filter((line) => /jira/i.test(line) && /comment|posted|comment id/i.test(line));
+  const transitionLines = lines.filter((line) => /jira|transition|status|in progress|to do/i.test(line) && /transition|status|in progress/i.test(line));
+  const failureLines = lines.filter((line) => /jira/i.test(line) && /fail|unable|unavailable|error|could not/i.test(line));
+
+  const postedComment = commentLines.some((line) => /posted|comment id|added|created/i.test(line));
+  const transitioned = transitionLines.some((line) => /in progress|transitioned|moved/i.test(line));
+  const hasFailure = failureLines.length > 0;
+
+  if (postedComment && transitioned && !hasFailure) {
+    return {
+      status: 'pass',
+      summary: 'Jira comment was posted and the issue transition was reported.',
+      checks: [
+        commentLines[0] || 'Jira comment posted.',
+        transitionLines[0] || 'Jira issue transitioned to In Progress.',
+      ],
+    };
+  }
+
+  if (postedComment || transitioned || hasFailure) {
+    return {
+      status: hasFailure ? 'warning' : 'pass',
+      summary: [
+        postedComment ? 'Jira comment result was reported.' : 'Jira comment result was not clearly reported.',
+        transitioned ? 'Jira transition result was reported.' : 'Jira transition result was not clearly reported.',
+      ].join(' '),
+      checks: [
+        commentLines[0] || 'Jira comment result missing from Claude final response.',
+        transitionLines[0] || 'Jira transition result missing from Claude final response.',
+        ...failureLines.slice(0, 2),
+      ].filter(Boolean),
+    };
+  }
+
+  return {
+    status: 'warning',
+    summary: 'Jira story was supplied, but Claude did not clearly report comment posting or transition.',
+    checks: [
+      'Expected Jira comment posting result after SQL generation.',
+      'Expected Jira transition to In Progress result after SQL generation.',
+    ],
+  };
+}
+
+function normalizeValidationStatus(status) {
+  const normalized = String(status || '').toLowerCase();
+  return ['pass', 'warning', 'fail', 'not_run'].includes(normalized) ? normalized : 'warning';
+}
+
+function normalizeValidationSection(section, fallbackSummary, fallbackChecks = [], fallbackStatus = 'warning') {
+  const value = section && typeof section === 'object' ? section : {};
+  const checks = Array.isArray(value.checks)
+    ? value.checks.map((check) => String(check)).filter(Boolean).slice(0, 8)
+    : fallbackChecks;
+
+  return {
+    status: normalizeValidationStatus(value.status || fallbackStatus),
+    summary: String(value.summary || fallbackSummary),
+    checks: checks.length > 0 ? checks : [fallbackSummary],
+  };
+}
+
+function hasUsableSection(section) {
+  return !!(
+    section &&
+    typeof section === 'object' &&
+    (section.summary || (Array.isArray(section.checks) && section.checks.length > 0))
+  );
+}
+
+const ACTIVITY_TYPES = new Set(['observation', 'inference', 'decision', 'validation', 'error', 'artifact']);
+const ACTIVITY_STATUSES = new Set(['running', 'completed', 'warning', 'failed', 'blocked', 'pending']);
+const ACTIVITY_SOURCES = new Set(['claude', 'bridge', 'jira', 'bigquery', 'github', 'offline', 'fallback']);
+
+function inferActivityType(text) {
+  const value = String(text || '').toLowerCase();
+  if (/error|failed|failure|limit|blocked|missing|not found|denied|unable/.test(value)) return 'error';
+  if (/infer|assum|confidence|candidate|proposed|likely/.test(value)) return 'inference';
+  if (/decision|selected|chosen|approved|load pattern|object type|partition|cluster/.test(value)) return 'decision';
+  if (/validat|dry run|dry-run|dryrun|audit|check|coverage/.test(value)) return 'validation';
+  if (/stm|sql|artifact|download|file/.test(value)) return 'artifact';
+  return 'observation';
+}
+
+function normalizeActivityStatus(status) {
+  const value = String(status || '').toLowerCase();
+  if (ACTIVITY_STATUSES.has(value)) return value;
+  if (value === 'active') return 'running';
+  if (value === 'pass') return 'completed';
+  if (value === 'fail') return 'failed';
+  if (value === 'not_run') return 'pending';
+  return 'completed';
+}
+
+function normalizeActivitySource(source) {
+  const value = String(source || '').toLowerCase();
+  return ACTIVITY_SOURCES.has(value) ? value : 'fallback';
+}
+
+function normalizeActivityType(type, text) {
+  const value = String(type || '').toLowerCase();
+  if (value === 'tool') return inferActivityType(text); // never expose tool-typed events
+  return ACTIVITY_TYPES.has(value) ? value : inferActivityType(text);
+}
+
+function normalizeStringList(value) {
+  if (!Array.isArray(value)) return undefined;
+  const list = value.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 8);
+  return list.length > 0 ? list : undefined;
+}
+
+function makeActivityEvent(event = {}) {
+  const summary = String(event.summary || event.title || 'Claude Code activity').trim();
+  const title = String(event.title || summary).trim();
+  const stage = event.stage || inferActivityStage(`${title} ${summary}`);
+  return {
+    id: event.id,
+    stage,
+    type: normalizeActivityType(event.type, `${title} ${summary}`),
+    status: normalizeActivityStatus(event.status),
+    title,
+    summary,
+    details: normalizeStringList(event.details),
+    confidence: typeof event.confidence === 'number' ? event.confidence : undefined,
+    evidence: normalizeStringList(event.evidence),
+    timestamp: typeof event.timestamp === 'number' && event.timestamp > 0 ? event.timestamp : Date.now(),
+    source: normalizeActivitySource(event.source),
+  };
+}
+
+function validationStatusToActivityStatus(status) {
+  const value = normalizeValidationStatus(status);
+  if (value === 'pass') return 'completed';
+  if (value === 'fail') return 'failed';
+  if (value === 'not_run') return 'pending';
+  return 'warning';
+}
+
+function activityEventsFromValidationSummary(summary = {}) {
+  // We deliberately DO NOT re-emit summary.activityLog, summary.activityDetails,
+  // or summary.inferences as activity cards here. Findings, inferences, and
+  // decisions are streamed live during the run via inline ```activity blocks
+  // and the semantic tool-pair translator. Re-emitting them at the end creates
+  // a wall of duplicated cards that the architect perceives as "all at once".
+  // Only the five structured validation sections are surfaced at completion —
+  // they are summaries, not duplicate findings.
+  const events = [];
+  const sections = [
+    ['requirementCoverage', 'Requirement Coverage', 'analysis'],
+    ['stmCompleteness', 'STM Completeness', 'sql_generation'],
+    ['schemaReconciliation', 'Schema Reconciliation', 'schema_resolution'],
+    ['sqlChecks', 'SQL Checks', 'validation'],
+    ['jiraTransition', 'Jira Transition', 'validation'],
+  ];
+  for (const [key, title, stage] of sections) {
+    const section = summary[key];
+    if (!section || typeof section !== 'object') continue;
+    events.push(makeActivityEvent({
+      stage,
+      type: 'validation',
+      status: validationStatusToActivityStatus(section.status),
+      title,
+      summary: section.summary || title,
+      evidence: Array.isArray(section.checks) ? section.checks : undefined,
+      source: 'claude',
+    }));
+  }
+
+  const seen = new Set();
+  return events.filter((event) => {
+    const key = `${event.stage}|${event.type}|${event.title}|${event.summary}`.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function normalizeValidationSummary(summary, context = {}) {
+  const source = summary && typeof summary === 'object' ? summary : {};
+  const sourceActivityLog = Array.isArray(source.activityLog)
+    ? source.activityLog
+    : Array.isArray(source.activity_log)
+      ? source.activity_log
+      : [];
+  const sourceInferences = Array.isArray(source.inferences)
+    ? source.inferences.map((item) => String(item)).filter(Boolean)
+    : [];
+  const inferences = [...sourceInferences, ...(context.inferences || [])].slice(0, 20);
+  const sourceActivityDetails = Array.isArray(source.activityDetails)
+    ? source.activityDetails.map((item) => String(item)).filter(Boolean)
+    : [];
+  const activityDetails = Array.from(new Set([...sourceActivityDetails, ...(context.activityDetails || [])])).slice(0, 40);
+  const jiraSignals = context.jiraSignals || {
+    status: context.hasJira ? 'warning' : 'not_run',
+    summary: context.hasJira ? 'Jira result was not returned.' : 'No Jira story was supplied.',
+    checks: [context.hasJira ? 'Jira comment and transition result missing.' : 'Jira comment and transition were not applicable.'],
+  };
+
+  if (Array.isArray(source.details) || source.summary || source.jiraStatus) {
+    const details = Array.isArray(source.details)
+      ? source.details.map((detail) => String(detail)).filter(Boolean)
+      : [String(source.summary || 'Validation completed by Claude Code.')];
+
+    return {
+      activityLog: sourceActivityLog.map((event) => makeActivityEvent({ ...event, source: event.source || 'claude' })),
+      activityDetails,
+      requirementCoverage: normalizeValidationSection(
+        { status: 'pass', summary: source.summary, checks: [...details.slice(0, 4), ...inferences.slice(0, 2)] },
+        'Requirements were validated against the generated SQL.',
+      ),
+      stmCompleteness: normalizeValidationSection(
+        { status: context.hasStm ? 'pass' : 'warning', summary: context.hasStm ? 'STM artifact was emitted successfully.' : 'Legacy validation output did not include structured STM checks.', checks: details.slice(0, 2) },
+        'STM completeness was not returned in structured form.',
+      ),
+      schemaReconciliation: normalizeValidationSection(
+        { status: 'warning', summary: 'Legacy validation output did not include structured schema reconciliation checks.', checks: details.slice(0, 2) },
+        'Schema reconciliation was not returned in structured form.',
+      ),
+      sqlChecks: normalizeValidationSection(
+        { status: context.hasSql ? 'pass' : 'warning', summary: context.hasSql ? 'Generated SQL was emitted successfully.' : 'Generated SQL was not detected.', checks: details.slice(0, 3) },
+        'Generated SQL was emitted successfully.',
+      ),
+      jiraTransition: normalizeValidationSection(
+        {
+          status: source.jiraStatus ? 'pass' : jiraSignals.status,
+          summary: source.jiraStatus || jiraSignals.summary,
+          checks: source.jiraStatus ? [source.jiraStatus] : jiraSignals.checks,
+        },
+        jiraSignals.summary,
+      ),
+      inferences,
+      generatedAt: source.generatedAt || new Date().toISOString(),
+    };
+  }
+
+  return {
+    activityLog: sourceActivityLog.map((event) => makeActivityEvent({ ...event, source: event.source || 'claude' })),
+    activityDetails,
+    requirementCoverage: normalizeValidationSection(
+      source.requirementCoverage,
+      context.hasSql
+        ? 'Generated SQL was reviewed against the supplied requirement context.'
+        : 'Requirement coverage validation was not returned.',
+      [context.hasSql
+        ? 'SQL was generated; Claude Code should have validated coverage against Jira/file/text requirements.'
+        : 'Claude Code should compare generated SQL with Jira/file/text requirements.',
+        ...inferences.slice(0, 2)],
+    ),
+    stmCompleteness: normalizeValidationSection(
+      source.stmCompleteness,
+      context.hasStm ? 'STM artifact was emitted successfully.' : 'STM completeness validation was not returned.',
+      [context.hasStm ? 'Fenced STM JSON block was detected.' : 'Claude Code should verify source, target, transformation, and business rule coverage.'],
+      context.hasStm ? 'pass' : 'warning',
+    ),
+    schemaReconciliation: normalizeValidationSection(
+      source.schemaReconciliation,
+      context.hasSql && !hasUsableSection(source.schemaReconciliation)
+        ? 'Schema reconciliation was not returned in structured form.'
+        : 'Schema reconciliation validation was not returned.',
+      [context.hasSql
+        ? 'If schema was explicit, no broad dataset crawl was required; if ambiguous, Claude Code should have reconciled only tables and columns inside the mandatory target dataset.'
+        : 'Claude Code should reconcile only tables and columns inside the mandatory target dataset when schema is unclear.'],
+    ),
+    sqlChecks: normalizeValidationSection(
+      source.sqlChecks,
+      context.hasSql ? 'Generated SQL was emitted successfully.' : 'SQL checks were not returned.',
+      [context.hasSql ? 'Fenced SQL block was detected and emitted to the UI.' : 'Claude Code should verify BigQuery SQL structure, aliases, casting, joins, filters, and obvious syntax issues.'],
+      context.hasSql ? 'pass' : 'warning',
+    ),
+    jiraTransition: normalizeValidationSection(
+      source.jiraTransition,
+      jiraSignals.summary,
+      jiraSignals.checks,
+      jiraSignals.status,
+    ),
+    inferences,
+    generatedAt: source.generatedAt || new Date().toISOString(),
+  };
+}
+
 // ── Clarification Detection ───────────────────────────────────
+// Relies solely on the [CLARIFY] sentinel that the prompt instructs
+// Claude to include — avoids brittle phrase-list matching.
 
 function isClarificationRequest(content) {
-  if (!content) return false;
-  const indicators = [
-    '[CLARIFY]',
-    'I need more information',
-    'Could you clarify',
-    'Can you provide more details',
-    'I have a few questions',
-    'Before I proceed',
-    'Please provide',
-    'What is the expected',
-    'Which table',
-    'Could you specify',
-    'Can you confirm',
-    'unclear from the requirements',
-    'need some clarification',
-  ];
-  const lower = content.toLowerCase();
-  return indicators.some((ind) => lower.includes(ind.toLowerCase()));
+  return typeof content === 'string' && content.includes('[CLARIFY]');
+}
+
+function extractClarification(content) {
+  const rawContent = String(content || '');
+  const detailText = rawContent
+    .replace(/\[CLARIFY\]/g, '')
+    .replace(/```clarification\s*\n[\s\S]*?```/gi, '')
+    .trim();
+  const fallback = {
+    message: detailText,
+    details: detailText,
+    needsInput: true,
+  };
+  const match = rawContent.match(/```clarification\s*\n([\s\S]*?)```/i);
+  if (!match) return fallback;
+
+  try {
+    const parsed = JSON.parse(match[1].trim());
+    const options = Array.isArray(parsed.options)
+      ? parsed.options.map((option) => String(option)).filter(Boolean).slice(0, 5)
+      : undefined;
+
+    return {
+      explanation: parsed.explanation ? String(parsed.explanation) : undefined,
+      message: String(parsed.question || parsed.message || fallback.message),
+      details: parsed.details ? String(parsed.details) : detailText || undefined,
+      options,
+      allowFreeText: parsed.allowFreeText !== false,
+      needsInput: true,
+    };
+  } catch {
+    return fallback;
+  }
 }
 
 // ── Pipeline Stage Mapping ────────────────────────────────────
+
+function runOfflineDryRun(request, onEvent) {
+  const text = [
+    request.contextText || '',
+    ...(request.messages || []).map((message) => message.content || ''),
+  ].join('\n');
+  const lowerText = text.toLowerCase();
+
+  onEvent({ type: 'status', stage: 'analysis', status: 'completed', message: 'Dry run requirement analysis completed.' });
+
+  const hasExplicitSchema =
+    /project\s*[:.=]/i.test(text) ||
+    /dataset\s*[:.=]/i.test(text) ||
+    /table\s*[:.=]/i.test(text) ||
+    /\bfrom\s+`?[\w-]+\.[\w-]+\.[\w-]+`?/i.test(text);
+
+  const needsClarification =
+    lowerText.includes('ambiguous') ||
+    lowerText.includes('unclear') ||
+    (!hasExplicitSchema && lowerText.includes('scrum-16'));
+
+  if (needsClarification) {
+    const clarificationDetails = [
+      'Dry run investigation found ambiguous schema context.',
+      '',
+      'The supplied intake does not provide clear table or column paths inside the mandatory target dataset. SQL Curator needs scoped schema confirmation before generation.',
+    ].join('\n');
+    onEvent({
+      type: 'status',
+      stage: 'schema_resolution',
+      status: 'blocked',
+      message: 'Dry run found ambiguous schema context.',
+    });
+    onEvent({
+      type: 'validation_summary',
+      summary: normalizeValidationSummary({
+        activityDetails: [
+          'Dry run inspected the supplied intake and found ambiguous schema context.',
+          'Schema resolution is blocked because table or column paths are not explicit inside the mandatory target dataset.',
+          'SQL generation was not started; user clarification is required.',
+        ],
+        inferences: [
+          'No safe schema inference was made because confidence is below the required threshold.',
+        ],
+        requirementCoverage: {
+          status: 'warning',
+          summary: 'Requirement intent was detected, but target-dataset table or column details are insufficient for SQL generation.',
+          checks: ['Detected missing or ambiguous table/column context within the mandatory target dataset.'],
+        },
+        stmCompleteness: {
+          status: 'warning',
+          summary: 'STM cannot be completed until source and target schema are confirmed.',
+          checks: ['Blocked before STM finalization.'],
+        },
+        schemaReconciliation: {
+          status: 'warning',
+          summary: 'Schema reconciliation requires user confirmation.',
+          checks: ['Prepared clarification options for the unresolved schema stage.'],
+        },
+        sqlChecks: {
+          status: 'not_run',
+          summary: 'SQL checks did not run because SQL was not generated.',
+          checks: ['Generation is intentionally blocked pending clarification.'],
+        },
+        jiraTransition: {
+          status: request.jiraInput?.project ? 'not_run' : 'not_run',
+          summary: request.jiraInput?.project
+            ? 'Jira transition is not attempted during clarification.'
+            : 'No Jira story was supplied for transition.',
+          checks: ['Jira updates occur only after successful SQL generation.'],
+        },
+      }, {
+        hasSql: false,
+        hasStm: false,
+        hasJira: !!request.jiraInput?.project,
+      }),
+    });
+    onEvent({
+      type: 'clarification',
+      explanation: 'The intake does not provide clear target-dataset table or column paths for schema reconciliation.',
+      message: 'Which schema context inside the target dataset should Claude use for this request?',
+      details: clarificationDetails,
+      options: [
+        'Use tables named in the uploaded mapping',
+        'Inspect matching tables only inside the target dataset',
+        'I will provide table and column names for this dataset',
+      ],
+      allowFreeText: true,
+      needsInput: true,
+    });
+    onEvent({ type: 'done', success: false, clarification: true });
+    return { success: false, clarification: true, assistantText: '[DRY_RUN_CLARIFICATION]' };
+  }
+
+  const projectId = String(request.bqProjectId || 'target_project');
+  const datasetId = String(request.bqDatasetId || 'target_dataset');
+  const sql = `-- SQL Curator offline dry run SQL
+-- Target project: ${projectId}
+-- Target dataset: ${datasetId}
+-- Validation: Generated without Claude or external services.
+WITH src_orders AS (
+  SELECT
+    order_id,
+    customer_id,
+    order_date,
+    SAFE_CAST(order_total AS NUMERIC) AS order_total
+  FROM \`${projectId}.${datasetId}.orders\`
+),
+
+final AS (
+  SELECT
+    customer_id,
+    DATE(order_date) AS order_date,
+    COUNT(DISTINCT order_id) AS order_count,
+    SUM(COALESCE(order_total, 0)) AS total_order_amount
+  FROM src_orders
+  GROUP BY customer_id, order_date
+)
+
+SELECT * FROM final;`;
+
+  onEvent({ type: 'status', stage: 'schema_resolution', status: 'completed', message: 'Dry run schema context resolved.' });
+  onEvent({ type: 'sql', sql, fileName: `sql_curator_offline_dry_run_${Date.now()}.sql` });
+  onEvent({ type: 'status', stage: 'sql_generation', status: 'completed', message: 'Dry run SQL generated.' });
+  onEvent({
+    type: 'validation_summary',
+    summary: normalizeValidationSummary({
+      inferences: [
+        `Inferred target project from mandatory BQ Project ID: ${projectId}.`,
+        `Used deterministic offline dry-run schema within mandatory dataset: ${datasetId}.`,
+      ],
+      requirementCoverage: {
+        status: 'pass',
+        summary: 'Offline dry run validated that supplied test context reaches SQL generation.',
+        checks: [
+          'Accepted Jira/text/file-shaped context without external APIs.',
+          'Generated deterministic SQL from the dry-run intake.',
+        ],
+      },
+      stmCompleteness: {
+        status: 'pass',
+        summary: 'Offline dry run emitted a downloadable STM artifact.',
+        checks: [
+          'STM row contains source, target, transformation, and business rule fields.',
+          'STM CSV and JSON download payloads are available to the UI.',
+        ],
+      },
+      schemaReconciliation: {
+        status: 'pass',
+        summary: 'Offline dry run used explicit deterministic schema context.',
+        checks: [
+          'No dataset crawl was performed.',
+          `Target project was set to ${projectId}.`,
+          `Target dataset was set to ${datasetId}.`,
+        ],
+      },
+      sqlChecks: {
+        status: 'pass',
+        summary: 'Offline dry run emitted BigQuery SQL and validation stage events.',
+        checks: [
+          'SQL uses project-and-dataset-qualified BigQuery table references.',
+          'SQL uses SAFE_CAST and COALESCE for production-oriented handling.',
+          'Pipeline milestones were emitted through Ready.',
+        ],
+      },
+      jiraTransition: {
+        status: request.jiraInput?.project ? 'warning' : 'not_run',
+        summary: request.jiraInput?.project
+          ? 'Offline dry run does not mutate Jira status.'
+          : 'No Jira story was supplied for transition.',
+        checks: [
+          request.jiraInput?.project
+            ? 'Jira transition requires live Claude Code MCP execution.'
+            : 'Jira transition was not applicable in this run.',
+        ],
+      },
+      generatedAt: new Date().toISOString(),
+    }),
+  });
+  onEvent({
+    type: 'stm',
+    artifact: {
+      rows: [
+        {
+          sourceField: 'order_id',
+          sourceTable: `${projectId}.${datasetId}.orders`,
+          sourceType: 'STRING',
+          targetColumn: 'order_count',
+          targetTable: `${projectId}.${datasetId}.customer_daily_orders`,
+          targetType: 'INT64',
+          transformation: 'COUNT(DISTINCT order_id)',
+          businessRule: 'Count unique orders by customer and date',
+          notes: 'Offline dry run only',
+        },
+      ],
+      title: 'Offline Dry Run STM',
+      description: 'Deterministic artifact used to validate SQL Curator UI wiring.',
+      source: request.jiraInput?.project ? 'jira' : 'text',
+      jiraRef: request.jiraInput?.project && request.jiraInput?.storyNumber
+        ? `${request.jiraInput.project}-${request.jiraInput.storyNumber}`
+        : undefined,
+      bqProject: projectId,
+      bqDataset: datasetId,
+      generatedAt: new Date().toISOString(),
+      version: nextStmVersion(request.sessionId),
+    },
+  });
+  onEvent({ type: 'status', stage: 'validation', status: 'completed', message: 'Dry run validation completed without external services.' });
+  onEvent({ type: 'status', stage: 'ready', status: 'completed', message: 'Dry run SQL ready.' });
+  onEvent({ type: 'done', success: true });
+
+  return { success: true, clarification: false, assistantText: '[DRY_RUN_SQL_READY]' };
+}
 
 function mapToolToStage(toolName) {
   const name = (toolName || '').toLowerCase();
   if (name.includes('jira')) return 'analysis';
   if (name.includes('bigquery') || name.includes('bq') || name.includes('dataset') || name.includes('table_schema')) return 'schema_resolution';
-  if (name.includes('github') || name.includes('pr') || name.includes('commit')) return 'validation';
   if (name.includes('sql') || name.includes('query') || name.includes('dry_run')) return 'validation';
   return 'intake';
+}
+
+function mapToolToActivityMessage(toolName, toolInput = {}) {
+  const name = String(toolName || '').toLowerCase();
+  const inputText = JSON.stringify(toolInput || {}).toLowerCase();
+
+  if (name.includes('jira')) {
+    if (/comment|addcomment|createcomment/.test(name) || /comment/.test(inputText)) {
+      return 'Posting Jira completion comment.';
+    }
+    if (/transition|status/.test(name) || /in progress|transition/.test(inputText)) {
+      return 'Updating Jira status to In Progress.';
+    }
+    if (/issue|story|ticket|get|search/.test(name) || /issue|story|ticket|scrum/.test(inputText)) {
+      return 'Fetching Jira story details.';
+    }
+    return 'Reading Jira context.';
+  }
+
+  if (name.includes('bigquery') || name.includes('google_cloud_bigquery') || name.includes('dataset') || name.includes('table')) {
+    if (/dry.?run|dryrun|dry_run|query_job|run_query|execute_query/.test(name) || /dry.?run|dryrun|dry_run/.test(inputText)) {
+      return 'Running BigQuery validation dry run.';
+    }
+    if (/schema|table|column/.test(name) || /schema|table|column/.test(inputText)) {
+      return 'Verifying scoped BigQuery schema.';
+    }
+    if (/dataset/.test(name) || /dataset/.test(inputText)) {
+      return 'Verifying the mandatory target BigQuery dataset.';
+    }
+    return 'Reconciling BigQuery metadata.';
+  }
+
+  if (name.includes('github')) {
+    return 'Preparing GitHub deployment through Claude Code.';
+  }
+
+  if (name.includes('sql') || name.includes('query')) {
+    return 'Validating generated SQL.';
+  }
+
+  return 'Claude Code is working on the request.';
+}
+
+function inferActivityStage(message) {
+  const text = String(message || '').toLowerCase();
+  if (/jira|story|requirement|acceptance|intake|analyz|analysis|s0[1-4]/.test(text)) return 'analysis';
+  if (/schema|dataset|table|column|reconcil|candidate|bigquery|bq|s0[5-6]/.test(text)) return 'schema_resolution';
+  if (/stm|mapping|source-to-target|logic model|generate|sql writer|s0[7-9]|s10/.test(text)) return 'sql_generation';
+  if (/validat|dry run|dry-run|dryrun|self-audit|jira comment|transition|s1[1-2]/.test(text)) return 'validation';
+  if (/ready|complete|sql_ready/.test(text)) return 'ready';
+  return 'analysis';
+}
+
+// ── Semantic tool → architect-readable finding ───────────────
+// Each MCP tool call is paired with its tool_result (by tool_use_id) so we
+// can synthesize one finding card with the actual learned content, in
+// architect language — never plumbing terms like "Called", "Invoked", "MCP".
+
+function safeJsonParse(text) {
+  if (!text || typeof text !== 'string') return null;
+  try { return JSON.parse(text); } catch { return null; }
+}
+
+function pickStrings(arr, fields, limit = 8) {
+  if (!Array.isArray(arr)) return [];
+  const out = [];
+  for (const item of arr) {
+    if (typeof item === 'string') { out.push(item); continue; }
+    if (item && typeof item === 'object') {
+      for (const f of fields) {
+        if (typeof item[f] === 'string' && item[f].trim()) { out.push(item[f]); break; }
+      }
+    }
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function clipForActivity(text, max = 220) {
+  const s = String(text || '').replace(/\s+/g, ' ').trim();
+  return s.length > max ? `${s.slice(0, max)}…` : s;
+}
+
+function semanticFindingFromToolPair(toolName, toolInput, toolResultText, isError) {
+  const name = String(toolName || '').toLowerCase();
+  const parsed = safeJsonParse(toolResultText);
+
+  // ── Jira read ─────────────────────────────────────────────
+  if (name.includes('getjiraissue')) {
+    const key = parsed?.key || toolInput?.issueIdOrKey || 'Jira story';
+    const summary = parsed?.fields?.summary;
+    const status = parsed?.fields?.status?.name;
+    const desc = typeof parsed?.fields?.description === 'string' ? clipForActivity(parsed.fields.description, 180) : null;
+    const acHint = desc && /acceptance/i.test(desc) ? 'Acceptance criteria captured in story description.' : null;
+    return {
+      stage: 'analysis',
+      type: 'observation',
+      status: isError ? 'warning' : 'completed',
+      title: isError ? `Could not fetch ${key}` : `Fetched ${key}: ${summary || 'story details'}`,
+      summary: isError ? clipForActivity(toolResultText) : `Story status: ${status || 'unknown'}. ${desc || ''}`.trim(),
+      evidence: acHint ? [acHint] : undefined,
+      source: 'jira',
+    };
+  }
+  if (name.includes('searchjiraissuesusingjql')) {
+    const total = parsed?.total || (Array.isArray(parsed?.issues) ? parsed.issues.length : null);
+    return {
+      stage: 'analysis',
+      type: 'observation',
+      status: isError ? 'warning' : 'completed',
+      title: isError ? 'Jira search failed' : 'Searched Jira',
+      summary: isError ? clipForActivity(toolResultText) : `Returned ${total ?? 'N/A'} candidate issue(s).`,
+      source: 'jira',
+    };
+  }
+
+  // ── Jira write — these are the ones we want to flag for ordering
+  if (name.includes('addcomment') && name.includes('jira')) {
+    const issueKey = toolInput?.issueIdOrKey || 'Jira story';
+    return {
+      stage: 'validation',
+      type: 'artifact',
+      status: isError ? 'failed' : 'completed',
+      title: isError ? `Jira comment failed on ${issueKey}` : `Posted Jira comment on ${issueKey}`,
+      summary: isError ? clipForActivity(toolResultText) : `Run summary published as a comment on ${issueKey}.`,
+      source: 'jira',
+    };
+  }
+  if (name.includes('transitionjiraissue')) {
+    const issueKey = toolInput?.issueIdOrKey || 'Jira story';
+    return {
+      stage: 'validation',
+      type: 'decision',
+      status: isError ? 'failed' : 'completed',
+      title: isError ? `Jira transition failed on ${issueKey}` : `Transitioned ${issueKey}`,
+      summary: isError ? clipForActivity(toolResultText) : `Issue moved to In Progress.`,
+      source: 'jira',
+    };
+  }
+  if (name.includes('jira')) {
+    return {
+      stage: 'analysis',
+      type: isError ? 'error' : 'observation',
+      status: isError ? 'warning' : 'completed',
+      title: isError ? 'Jira call returned an issue' : 'Jira lookup completed',
+      summary: clipForActivity(toolResultText),
+      source: 'jira',
+    };
+  }
+
+  // ── BigQuery ──────────────────────────────────────────────
+  if (name.includes('list_dataset_ids')) {
+    const datasets = pickStrings(parsed?.datasets, ['datasetId', 'id']);
+    return {
+      stage: 'schema_resolution',
+      type: 'observation',
+      status: isError ? 'warning' : 'completed',
+      title: isError ? 'Could not list datasets' : `Listed datasets in project`,
+      summary: isError ? clipForActivity(toolResultText) : `Found ${datasets.length} dataset(s): ${datasets.join(', ') || '—'}`,
+      evidence: datasets.length ? datasets : undefined,
+      source: 'bigquery',
+    };
+  }
+  if (name.includes('list_table_ids')) {
+    const tables = pickStrings(parsed?.tables, ['tableId', 'id']);
+    const ds = toolInput?.datasetId;
+    return {
+      stage: 'schema_resolution',
+      type: 'observation',
+      status: isError ? 'warning' : 'completed',
+      title: isError ? `Could not list tables in ${ds}` : `Discovered tables in ${ds || 'dataset'}`,
+      summary: isError ? clipForActivity(toolResultText) : `${tables.length} table(s) in scope: ${tables.join(', ') || '—'}`,
+      evidence: tables.length ? tables : undefined,
+      source: 'bigquery',
+    };
+  }
+  if (name.includes('get_dataset_info')) {
+    const ds = parsed?.datasetReference?.datasetId || toolInput?.datasetId;
+    const desc = parsed?.description;
+    const loc = parsed?.location;
+    return {
+      stage: 'schema_resolution',
+      type: 'observation',
+      status: isError ? 'warning' : 'completed',
+      title: isError ? `Could not inspect dataset ${ds}` : `Verified dataset ${ds}`,
+      summary: isError ? clipForActivity(toolResultText) : `Exists in ${loc || 'unknown region'}. ${desc || ''}`.trim(),
+      source: 'bigquery',
+    };
+  }
+  if (name.includes('get_table_info')) {
+    const table = parsed?.tableReference?.tableId || toolInput?.tableId;
+    const fields = pickStrings(parsed?.schema?.fields, ['name']);
+    return {
+      stage: 'schema_resolution',
+      type: 'observation',
+      status: isError ? 'warning' : 'completed',
+      title: isError ? `Could not inspect table ${table}` : `Examined schema of ${table}`,
+      summary: isError ? clipForActivity(toolResultText) : `${fields.length} column(s): ${fields.slice(0, 6).join(', ')}${fields.length > 6 ? '…' : ''}`,
+      evidence: fields.length ? fields : undefined,
+      source: 'bigquery',
+    };
+  }
+  if (name.includes('execute_sql')) {
+    if (isError) {
+      return {
+        stage: 'validation',
+        type: 'error',
+        status: 'warning',
+        title: 'BigQuery dry run / read returned an error',
+        summary: clipForActivity(toolResultText),
+        source: 'bigquery',
+      };
+    }
+    const rows = Array.isArray(parsed?.rows) ? parsed.rows.length : null;
+    const bytes = parsed?.totalBytesProcessed || parsed?.total_bytes_processed;
+    return {
+      stage: 'validation',
+      type: 'validation',
+      status: 'completed',
+      title: 'BigQuery query completed',
+      summary: `Rows: ${rows ?? 'N/A'}. Bytes processed: ${bytes ?? 'N/A'}.`,
+      source: 'bigquery',
+    };
+  }
+  if (name.includes('bigquery') || name.includes('bq')) {
+    return {
+      stage: 'schema_resolution',
+      type: isError ? 'error' : 'observation',
+      status: isError ? 'warning' : 'completed',
+      title: isError ? 'BigQuery call returned an issue' : 'BigQuery metadata inspected',
+      summary: clipForActivity(toolResultText),
+      source: 'bigquery',
+    };
+  }
+
+  // ── GitHub ────────────────────────────────────────────────
+  if (name.includes('github')) {
+    return {
+      stage: 'ready',
+      type: isError ? 'error' : 'artifact',
+      status: isError ? 'warning' : 'completed',
+      title: isError ? 'GitHub action returned an issue' : 'GitHub action completed',
+      summary: clipForActivity(toolResultText),
+      source: 'github',
+    };
+  }
+
+  // Default — return nothing so generic tools stay silent.
+  return null;
+}
+
+// ── Inline streaming activity parser ──────────────────────────
+// Claude emits one ```activity ... ``` JSON block after each significant
+// step. We scan accumulated stream text from a sliding offset and emit each
+// completed block as an SSE activity_event the moment its closing fence
+// arrives — that is what drives the live Activity Feed.
+const INLINE_ACTIVITY_RE = /```activity\s*\n([\s\S]*?)\n```/g;
+
+function processInlineActivities(text, fromOffset, onEvent, seen) {
+  let advanceTo = fromOffset;
+  INLINE_ACTIVITY_RE.lastIndex = fromOffset;
+  let match;
+  while ((match = INLINE_ACTIVITY_RE.exec(text)) !== null) {
+    const raw = match[1].trim();
+    advanceTo = INLINE_ACTIVITY_RE.lastIndex;
+    if (seen.has(raw)) continue;
+    seen.add(raw);
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      console.error(`  [activity] Failed to parse inline block: ${err.message}`);
+      continue;
+    }
+    onEvent({
+      type: 'activity_event',
+      event: makeActivityEvent({
+        ...parsed,
+        source: parsed.source || 'claude',
+      }),
+    });
+  }
+  return advanceTo;
+}
+
+function stripInlineActivities(text) {
+  return String(text || '').replace(/\n?```activity\s*\n[\s\S]*?\n```\n?/g, '\n').trim();
 }
 
 // ── Claude CLI Spawner ────────────────────────────────────────
@@ -301,15 +1474,34 @@ async function runClaude(prompt, sessionId, request, onEvent) {
 
   let proc = null;
   let timeoutId = null;
-  let accumulatedText = '';
+  // accumulatedDeltas: built up from content_block_delta events (streaming)
+  // fullMessageText: set from 'assistant' full-message events (authoritative)
+  let accumulatedDeltas = '';
+  let fullMessageText = '';
+  let hasStartedMessage = false;
   let toolCalls = new Set();
+  let hasCleanedUp = false;
+  // Streaming activity-block parser state
+  let activityScanOffsetDeltas = 0;
+  let activityScanOffsetFull = 0;
+  const seenActivityBlocks = new Set();
+  // Pending tool_use entries keyed by tool_use_id, awaiting their tool_result.
+  // Each entry: { name, input, stageAtCall }
+  const pendingToolCalls = new Map();
+  // Jira-ordering tracking: has a successful BigQuery dry-run completed yet?
+  const orderingState = { dryRunPassed: false, jiraCommentBeforeDryRun: false };
 
   const cleanup = () => {
+    if (hasCleanedUp) return;
+    hasCleanedUp = true;
     clearTimeout(timeoutId);
     activeRequests--;
-    if (proc && !proc.killed) {
-      proc.kill('SIGTERM');
-      setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* already dead */ } }, 3000);
+    if (proc) {
+      spawnedProcs.delete(proc);
+      if (!proc.killed) {
+        proc.kill('SIGTERM');
+        setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* already dead */ } }, 3000);
+      }
     }
   };
 
@@ -323,7 +1515,17 @@ async function runClaude(prompt, sessionId, request, onEvent) {
       '--output-format', 'stream-json',
       '--max-turns', String(CLAUDE_MAX_TURNS),
       '--verbose',
+      '--dangerously-skip-permissions', // headless mode: auto-approve all MCP tool calls
     ];
+
+    // Two-pass Jira ordering: block Jira write tools during the main run so
+    // Claude cannot post the comment or transition the issue before the
+    // strict validation gate clears. We perform a follow-up Claude pass with
+    // these tools allowed once the gate passes.
+    const isJiraBacked = !!(request.jiraInput?.project && request.jiraInput?.storyNumber);
+    if (JIRA_COMPLETION_ENABLED && isJiraBacked && JIRA_WRITE_TOOLS.length > 0) {
+      args.push('--disallowedTools', JIRA_WRITE_TOOLS.join(','));
+    }
 
     // Resume conversation if we have a conversation ID
     if (session.conversationId) {
@@ -337,6 +1539,7 @@ async function runClaude(prompt, sessionId, request, onEvent) {
         HOME: os.homedir(),
       },
     });
+    spawnedProcs.add(proc);
 
     // Timeout handler
     timeoutId = setTimeout(() => {
@@ -345,6 +1548,7 @@ async function runClaude(prompt, sessionId, request, onEvent) {
     }, CLAUDE_TIMEOUT_MS);
 
     let buffer = '';
+    const claudeStartMs = Date.now();
 
     proc.stdout.on('data', (chunk) => {
       buffer += chunk.toString('utf-8');
@@ -353,9 +1557,45 @@ async function runClaude(prompt, sessionId, request, onEvent) {
 
       for (const line of lines) {
         if (!line.trim()) continue;
-        const result = parseClaudeLine(line, onEvent, toolCalls);
-        if (result?.text) {
-          accumulatedText = result.text;
+        // Log each stream-json line with a timestamp so we can see whether
+        // Claude itself is emitting progressively or batching.
+        let snippet = line;
+        try {
+          const j = JSON.parse(line);
+          snippet = `${j.type}${j.message?.role ? `/${j.message.role}` : ''}${j.message?.content ? ` blocks=${(j.message.content || []).map((c) => c.type).join(',')}` : ''}${j.subtype ? ` subtype=${j.subtype}` : ''}`;
+        } catch { /* keep raw */ }
+        console.log(`  [claude +${String(Date.now() - claudeStartMs).padStart(5, ' ')}ms] ${snippet}`);
+        const result = parseClaudeLine(line, onEvent, {
+          toolCalls,
+          pendingToolCalls,
+          orderingState,
+        });
+        if (result?.delta) {
+          // Emit message_start once before the first streaming chunk
+          if (!hasStartedMessage) {
+            hasStartedMessage = true;
+            onEvent({ type: 'message_start' });
+          }
+          onEvent({ type: 'message_delta', content: result.delta });
+          accumulatedDeltas += result.delta;
+          activityScanOffsetDeltas = processInlineActivities(
+            accumulatedDeltas,
+            activityScanOffsetDeltas,
+            onEvent,
+            seenActivityBlocks,
+          );
+        }
+        if (result?.fullText) {
+          // Accumulate across turns — multi-turn runs emit multiple assistant events
+          fullMessageText = fullMessageText
+            ? fullMessageText + '\n\n' + result.fullText
+            : result.fullText;
+          activityScanOffsetFull = processInlineActivities(
+            fullMessageText,
+            activityScanOffsetFull,
+            onEvent,
+            seenActivityBlocks,
+          );
         }
         if (result?.conversationId) {
           session.conversationId = result.conversationId;
@@ -379,46 +1619,230 @@ async function runClaude(prompt, sessionId, request, onEvent) {
       proc.stdin.end();
     });
 
-    proc.on('close', (code) => {
+    proc.on('close', async (code) => {
       cleanup();
       console.log(`  [claude] Exited with code ${code} for session ${sessionId.slice(0, 8)}`);
 
-      // Determine if this was a clarification request
-      const isClarify = isClarificationRequest(accumulatedText);
-      const hasSql = !!extractSql(accumulatedText);
+      // Prefer the authoritative full-message text; fall back to accumulated streaming deltas
+      const finalText = fullMessageText || accumulatedDeltas;
 
-      if (accumulatedText) {
-        onEvent({ type: 'message', content: accumulatedText });
+      // Determine if this was a clarification request — only honour [CLARIFY] sentinel
+      const isClarify = finalText.includes('[CLARIFY]');
+      const sqlBlock  = extractSql(finalText);
+      const hasSqlBlock = !!sqlBlock;
+
+      // Emit final message (replaces/corrects any streaming bubble on the
+      // client). Strip out the inline ```activity blocks: they were already
+      // streamed individually as activity_event SSEs and would otherwise
+      // appear as a wall of JSON in the assistant message cache.
+      if (finalText) {
+        onEvent({ type: 'message', content: stripInlineActivities(finalText) });
       }
 
-      if (hasSql) {
-        onEvent({ type: 'sql', sql: extractSql(accumulatedText), fileName: `generated_sql_${Date.now()}.sql` });
+      // ── Strict validation gate ──────────────────────────────
+      // Refuse to surface [SQL_READY] unless Claude's structured
+      // validation.sqlChecks.status is exactly 'pass'. This enforces the
+      // SKILL S11 dry-run + auto-fix contract at the bridge level: a run
+      // that returned SQL but did not validate is treated as a failed run.
+      let validationSummary = null;
+      let sqlChecksStatus = 'not_run';
+      let gatePassed = false;
+      let gateBlockedBy = null;
+      if (hasSqlBlock) {
+        validationSummary = extractValidationSummary(finalText, request);
+        sqlChecksStatus = validationSummary?.sqlChecks?.status || 'not_run';
+        if (REQUIRE_SQLCHECKS_PASS) {
+          gatePassed = sqlChecksStatus === 'pass';
+          if (!gatePassed) {
+            gateBlockedBy = sqlChecksStatus;
+          }
+        } else {
+          gatePassed = true;
+        }
+      }
+      const surfacesSql = hasSqlBlock && gatePassed;
+
+      if (surfacesSql) {
+        const ticketKey = request.jiraInput?.project && request.jiraInput?.storyNumber
+          ? `${request.jiraInput.project}-${request.jiraInput.storyNumber}`
+          : 'standalone';
+        onEvent({ type: 'status', stage: 'analysis', status: 'completed', message: 'Requirement analysis completed.' });
+        onEvent({ type: 'status', stage: 'schema_resolution', status: 'completed', message: 'Schema and mapping context resolved.' });
+        onEvent({ type: 'sql', sql: sqlBlock, fileName: `sql_curator_${ticketKey}_${Date.now()}.sql` });
+        onEvent({
+          type: 'activity_event',
+          event: makeActivityEvent({
+            stage: 'sql_generation',
+            type: 'artifact',
+            status: 'completed',
+            title: 'SQL Generated',
+            summary: 'Claude Code returned a fenced BigQuery SQL artifact for review.',
+            evidence: [`${sqlBlock.split('\n').length} SQL line(s) emitted.`],
+            source: 'claude',
+          }),
+        });
+        onEvent({ type: 'status', stage: 'sql_generation', status: 'completed', message: 'BigQuery SQL generated by Claude Code.' });
+        onEvent({ type: 'validation_summary', summary: validationSummary });
+        onEvent({ type: 'status', stage: 'validation', status: 'completed', message: 'Validated against requirements, mappings, and available schema context.' });
       }
 
-      // Extract and emit STM artifact
-      if (hasSql) {
-        const stm = extractStm(accumulatedText, request);
+      const isGithubDeploy = request.taskType === 'github_deploy';
+
+      // ── Gated rejection: SQL existed but dry-run/validation did not pass ──
+      if (hasSqlBlock && !gatePassed && !isClarify && !isGithubDeploy) {
+        const gateReason = (() => {
+          switch (gateBlockedBy) {
+            case 'fail':
+              return 'BigQuery dry run or SQL validation reported a failure.';
+            case 'warning':
+              return 'BigQuery dry run or SQL validation reported warnings; strict mode requires `pass`.';
+            case 'not_run':
+              return 'BigQuery dry run was not attempted. Strict mode requires a successful dry run before SQL is released.';
+            default:
+              return `SQL checks returned status "${gateBlockedBy}"; strict mode requires "pass".`;
+          }
+        })();
+        const checks = Array.isArray(validationSummary?.sqlChecks?.checks)
+          ? validationSummary.sqlChecks.checks.slice(0, 5)
+          : [];
+        onEvent({
+          type: 'status',
+          stage: 'validation',
+          status: 'failed',
+          message: 'SQL withheld: validation did not pass.',
+        });
+        onEvent({ type: 'validation_summary', summary: validationSummary });
+        onEvent({
+          type: 'activity_event',
+          event: makeActivityEvent({
+            stage: 'validation',
+            type: 'error',
+            status: 'failed',
+            title: 'SQL Withheld — Validation Did Not Pass',
+            summary: gateReason,
+            details: [
+              'Strict mode is enabled (SQL_CURATOR_REQUIRE_DRYRUN_PASS).',
+              'Generated SQL was not released to the UI because validation.sqlChecks.status is not "pass".',
+              ...checks,
+            ],
+            evidence: checks,
+            source: 'bridge',
+          }),
+        });
+        onEvent({
+          type: 'error',
+          message: 'SQL was generated but withheld because validation did not pass.',
+          hint: `${gateReason} Resubmit so Claude can diagnose and retry the dry run; see Activity Feed for findings.`,
+        });
+      }
+
+      if (!hasSqlBlock && !isClarify && !isGithubDeploy) {
+        const terminalIssue = detectTerminalRunIssue(finalText);
+        onEvent({
+          type: 'status',
+          stage: 'validation',
+          status: 'failed',
+          message: terminalIssue.kind === 'claude_limit'
+            ? 'Claude Code usage limit stopped the run before SQL was returned.'
+            : 'Claude Code finished without returning generated SQL.',
+        });
+        onEvent({
+          type: 'validation_summary',
+          summary: buildTerminalFailureValidationSummary(finalText, request, terminalIssue),
+        });
+        onEvent({
+          type: 'activity_event',
+          event: makeActivityEvent({
+            stage: 'validation',
+            type: 'error',
+            status: 'failed',
+            title: 'Run Stopped Before SQL',
+            summary: terminalIssue.message,
+            details: terminalIssue.hint ? [terminalIssue.hint] : undefined,
+            source: 'bridge',
+          }),
+        });
+        onEvent({
+          type: 'error',
+          message: terminalIssue.message,
+          hint: terminalIssue.hint,
+        });
+      }
+
+      // Extract and emit STM artifact only when SQL is actually surfaced
+      if (surfacesSql) {
+        const stm = extractStm(finalText, request, sessionId);
         if (stm && stm.rows.length > 0) {
           onEvent({ type: 'stm', artifact: stm });
+          onEvent({
+            type: 'activity_event',
+            event: makeActivityEvent({
+              stage: 'sql_generation',
+              type: 'artifact',
+              status: 'completed',
+              title: 'STM Artifact Built',
+              summary: `Claude Code returned a Source-to-Target Map with ${stm.rows.length} mapping row(s).`,
+              source: 'claude',
+            }),
+          });
           console.log(`  [stm] Extracted STM with ${stm.rows.length} rows`);
         }
       }
 
-      if (isClarify && !hasSql) {
-        // Claude needs more information — emit clarification event
+      if (isClarify && !surfacesSql) {
+        onEvent({ type: 'status', stage: 'analysis', status: 'blocked', message: 'Clarification required before continuing.' });
+        onEvent({ type: 'validation_summary', summary: extractValidationSummary(finalText, request) });
+        const clarification = extractClarification(finalText);
         onEvent({
-          type: 'clarification',
-          message: accumulatedText,
-          needsInput: true,
+          type: 'activity_event',
+          event: makeActivityEvent({
+            stage: 'analysis',
+            type: 'decision',
+            status: 'blocked',
+            title: 'Clarification Required',
+            summary: clarification.explanation || clarification.message || 'Claude Code needs user clarification before continuing.',
+            details: clarification.details ? [clarification.details] : undefined,
+            evidence: clarification.options,
+            source: 'claude',
+          }),
         });
+        onEvent({ type: 'clarification', ...clarification });
       }
 
-      onEvent({ type: 'done', success: code === 0 || hasSql });
+      // ── Two-pass Jira completion ────────────────────────────
+      // Now that the strict gate has cleared, run the Jira comment +
+      // transition as a focused follow-up. This guarantees they happen AFTER
+      // SQL/STM/validation, not before — regardless of how Claude reasoned
+      // during the main pass (which had Jira write tools disallowed).
+      const isJiraBackedRun = !!(request.jiraInput?.project && request.jiraInput?.storyNumber);
+      if (surfacesSql && isJiraBackedRun && JIRA_COMPLETION_ENABLED) {
+        try {
+          await runJiraCompletion(sessionId, session, request, validationSummary, onEvent);
+        } catch (followUpErr) {
+          onEvent({
+            type: 'activity_event',
+            event: makeActivityEvent({
+              stage: 'validation',
+              type: 'error',
+              status: 'warning',
+              title: 'Jira Follow-up Did Not Complete',
+              summary: `Bridge-led Jira completion pass failed: ${followUpErr.message}. The SQL is still valid; rerun if the Jira issue needs an update.`,
+              source: 'bridge',
+            }),
+          });
+        }
+      }
+
+      if (surfacesSql) {
+        onEvent({ type: 'status', stage: 'ready', status: 'completed', message: 'SQL ready for review and copy.' });
+      }
+
+      onEvent({ type: 'done', success: surfacesSql || (isGithubDeploy && code === 0 && !isClarify) });
 
       resolve({
-        success: code === 0 || hasSql,
-        clarification: isClarify && !hasSql,
-        assistantText: accumulatedText,
+        success:       code === 0 || surfacesSql,
+        clarification: isClarify && !surfacesSql,
+        assistantText: finalText,
       });
     });
 
@@ -432,48 +1856,94 @@ async function runClaude(prompt, sessionId, request, onEvent) {
   });
 }
 
-// ── Quick Claude Runner (for discovery queries) ──────────────
-// Spawns Claude with a single-turn limit, returns raw text output.
-// Used for project listing — lightweight, fast.
+// ── Two-pass Jira completion ──────────────────────────────────
+// Spawned after the main run's strict gate passes. Resumes the same Claude
+// conversation with Jira write tools allowed and instructs Claude to do ONLY
+// the Jira comment + transition. Surfaces tool-derived activity cards via
+// the same semantic translator the main pass uses.
 
-async function runQuickClaude(prompt, timeoutMs = 30000) {
+async function runJiraCompletion(sessionId, session, request, validationSummary, onEvent) {
   const claudeBin = findClaude();
-  if (!claudeBin) throw new Error('Claude CLI not found');
+  if (!claudeBin) throw new Error('Claude CLI not found for Jira completion');
 
-  if (activeRequests >= MAX_CONCURRENT) {
-    throw new Error(`Server busy. ${MAX_CONCURRENT} concurrent requests max.`);
+  const issueKey = `${request.jiraInput.project}-${request.jiraInput.storyNumber}`;
+  const stmSummary = validationSummary?.stmCompleteness?.summary || 'STM completeness verified.';
+  const reqSummary = validationSummary?.requirementCoverage?.summary || 'Requirement coverage verified.';
+  const sqlSummary = validationSummary?.sqlChecks?.summary || 'BigQuery dry run passed.';
+  const inferences = Array.isArray(validationSummary?.inferences) ? validationSummary.inferences.slice(0, 6) : [];
+  const runMarker = `SQL Curator run ${new Date().toISOString()}`;
+
+  const prompt = `The SQL Curator generation pass for ${issueKey} just finished successfully. The bridge withheld this conversation's Jira write tools so the comment could not be posted prematurely. Those tools are now re-enabled. Perform the Jira completion step now.
+
+This is a NEW run. The Jira issue may already contain comments from prior runs — IGNORE THEM. You MUST post a fresh comment for this run regardless of what is already on the issue.
+
+Authoritative context from the run that just completed:
+- STM status: ${stmSummary}
+- Requirement coverage: ${reqSummary}
+- BigQuery validation: ${sqlSummary}
+- Run marker (include verbatim in the comment so it is uniquely identifiable): ${runMarker}
+${inferences.length ? `- Key inferences/assumptions:\n${inferences.map((i) => `  - ${i}`).join('\n')}` : ''}
+
+REQUIRED ACTIONS — all three are mandatory, in order:
+
+1. Call mcp__claude_ai_Atlassian_Rovo__addCommentToJiraIssue on ${issueKey}. The comment body must include:
+   - The run marker on the first line: "${runMarker}"
+   - SQL purpose and target output object
+   - STM row count and completeness
+   - Requirement coverage against acceptance criteria
+   - BigQuery dry-run result (state "PASS" explicitly)
+   - Key assumptions or unresolved warnings
+
+2. Call mcp__claude_ai_Atlassian_Rovo__getTransitionsForJiraIssue on ${issueKey} to retrieve the list of available workflow transitions.
+
+3. From the transitions returned in step 2, pick the one whose name most closely matches "In Progress", "In Development", "Start Progress", or "Begin". Then call mcp__claude_ai_Atlassian_Rovo__transitionJiraIssue on ${issueKey} using that transition's ID. If no transition resembles an "in progress" state, pick the transition that moves the issue forward in the workflow.
+
+Hard constraints:
+- You MUST call addCommentToJiraIssue exactly once first. Do not skip it.
+- You MUST call getTransitionsForJiraIssue to discover the correct transition — do not guess the transition ID or name.
+- You MUST call transitionJiraIssue with the ID from the transitions list, not a guessed name.
+- Do NOT regenerate SQL, STM, or any validation block.
+- Do NOT call BigQuery tools.
+- Do NOT call getJiraIssue to inspect existing comments — go straight to addCommentToJiraIssue.
+- After all three calls return, reply with a single short confirmation sentence stating the comment ID and the new Jira status. Do NOT emit [SQL_READY] or any fenced sql/stm/validation/activity blocks.`;
+
+  const args = [
+    '-p',
+    '-',
+    '--output-format', 'stream-json',
+    '--max-turns', '8',
+    '--verbose',
+    '--dangerously-skip-permissions',
+  ];
+  if (session.conversationId) {
+    args.push('--resume', session.conversationId);
   }
 
-  activeRequests++;
-
   return new Promise((resolve, reject) => {
-    let proc = null;
-    let timeoutId = null;
-    let accumulatedText = '';
-
-    const cleanup = () => {
-      clearTimeout(timeoutId);
-      activeRequests--;
-      if (proc && !proc.killed) {
-        proc.kill('SIGTERM');
-        setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* dead */ } }, 2000);
-      }
-    };
-
-    proc = spawn(claudeBin, [
-      '-p', '-',
-      '--output-format', 'stream-json',
-      '--max-turns', '1',
-      '--verbose',
-    ], {
+    const proc = spawn(claudeBin, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, HOME: os.homedir() },
     });
+    spawnedProcs.add(proc);
 
-    timeoutId = setTimeout(() => {
-      cleanup();
-      reject(new Error(`Discovery timed out after ${timeoutMs / 1000}s`));
-    }, timeoutMs);
+    // Track whether Claude actually invoked the comment + transition tools.
+    // If the follow-up pass exits without these, we emit a hard warning
+    // because the architect just lost their Jira update.
+    const followUpState = { commentPosted: false, transitioned: false };
+
+    // Localised parser state — reuse semantic tool translator via parseClaudeLine.
+    const ctx = {
+      toolCalls: new Set(),
+      pendingToolCalls: new Map(),
+      // Mark dry-run as already-passed so the ordering detector stays silent
+      // during this pass (the gate already validated it upstream).
+      orderingState: { dryRunPassed: true, jiraCommentBeforeDryRun: false },
+    };
+
+    // Intercept tool_use lines to record whether the expected MCP calls fire.
+    const wrappedOnEvent = (event) => {
+      onEvent(event);
+    };
 
     let buffer = '';
     proc.stdout.on('data', (chunk) => {
@@ -482,39 +1952,87 @@ async function runQuickClaude(prompt, timeoutMs = 30000) {
       buffer = lines.pop() || '';
       for (const line of lines) {
         if (!line.trim()) continue;
+        // Sniff the raw stream-json for the two required tool invocations so
+        // we can verify them independent of Claude's prose claims.
         try {
-          const parsed = JSON.parse(line);
-          // Extract text content
-          if (parsed.type === 'content_block_delta' && parsed.delta?.type === 'text_delta' && parsed.delta.text) {
-            accumulatedText += parsed.delta.text;
+          const raw = JSON.parse(line);
+          const checkToolUse = (entry) => {
+            const n = String(entry?.name || entry?.tool_name || '').toLowerCase();
+            if (n.includes('addcomment') && n.includes('jira')) followUpState.commentPosted = true;
+            if (n.includes('transitionjira') && !n.includes('gettransitions')) followUpState.transitioned = true;
+          };
+          if (raw?.type === 'tool_use') checkToolUse(raw);
+          else if (raw?.type === 'assistant' && Array.isArray(raw?.message?.content)) {
+            for (const c of raw.message.content) if (c?.type === 'tool_use') checkToolUse(c);
           }
-          if (parsed.type === 'assistant' && parsed.message?.content) {
-            for (const c of parsed.message.content) {
-              if (c.type === 'text' && c.text) accumulatedText += c.text;
-            }
-          }
-        } catch { /* skip */ }
+        } catch { /* not JSON, skip */ }
+        const result = parseClaudeLine(line, wrappedOnEvent, ctx);
+        if (result?.conversationId) session.conversationId = result.conversationId;
       }
     });
 
     proc.stderr.on('data', (chunk) => {
       const text = chunk.toString('utf-8').trim();
-      if (text) console.error(`  [discover stderr] ${text}`);
+      if (text) console.error(`  [jira-followup stderr] ${text}`);
     });
 
     proc.stdin.write(prompt, (err) => {
-      if (err) { cleanup(); reject(new Error(`Failed to write: ${err.message}`)); return; }
+      if (err) {
+        try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+        spawnedProcs.delete(proc);
+        reject(new Error(`Failed to write Jira completion prompt: ${err.message}`));
+        return;
+      }
       proc.stdin.end();
     });
 
-    proc.on('close', (code) => {
-      cleanup();
-      resolve({ success: code === 0, text: accumulatedText });
+    const timer = setTimeout(() => {
+      try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+      spawnedProcs.delete(proc);
+      reject(new Error(`Jira completion pass timed out after ${JIRA_COMPLETION_TIMEOUT_MS / 1000}s`));
+    }, JIRA_COMPLETION_TIMEOUT_MS);
+
+    proc.on('close', (exitCode) => {
+      clearTimeout(timer);
+      spawnedProcs.delete(proc);
+      console.log(`  [jira-followup] Exited with code ${exitCode} for session ${sessionId.slice(0, 8)} commentPosted=${followUpState.commentPosted} transitioned=${followUpState.transitioned}`);
+
+      // Hard verification: if Claude didn't actually invoke the required
+      // Jira write tools, surface a loud failure card so the architect
+      // knows the Jira update did NOT happen.
+      if (!followUpState.commentPosted || !followUpState.transitioned) {
+        const missing = [
+          !followUpState.commentPosted ? 'comment' : null,
+          !followUpState.transitioned ? 'transition' : null,
+        ].filter(Boolean).join(' + ');
+        onEvent({
+          type: 'activity_event',
+          event: makeActivityEvent({
+            stage: 'validation',
+            type: 'error',
+            status: 'failed',
+            title: 'Jira Update Skipped',
+            summary: `The bridge's Jira follow-up pass ended without invoking the required ${missing} tool(s) on ${issueKey}. The Jira issue was NOT updated.`,
+            details: [
+              `Run marker that should have appeared on the comment: ${runMarker}`,
+              'This usually means Claude decided to skip; check the Claude CLI version supports the disallowedTools flag and that Jira write MCP tools are reachable.',
+            ],
+            evidence: [
+              `commentPosted=${followUpState.commentPosted}`,
+              `transitioned=${followUpState.transitioned}`,
+              `exitCode=${exitCode}`,
+            ],
+            source: 'bridge',
+          }),
+        });
+      }
+      resolve({ exitCode, ...followUpState });
     });
 
     proc.on('error', (err) => {
-      cleanup();
-      reject(new Error(`Failed to spawn Claude: ${err.message}`));
+      clearTimeout(timer);
+      spawnedProcs.delete(proc);
+      reject(err);
     });
   });
 }
@@ -523,7 +2041,8 @@ async function runQuickClaude(prompt, timeoutMs = 30000) {
 // Handles the various event types from `claude --output-format stream-json`
 // Reference: https://docs.anthropic.com/en/docs/claude-code/cli-reference
 
-function parseClaudeLine(line, onEvent, toolCalls) {
+function parseClaudeLine(line, onEvent, ctx) {
+  const { toolCalls, pendingToolCalls, orderingState } = ctx;
   let parsed;
   try {
     parsed = JSON.parse(line);
@@ -537,54 +2056,96 @@ function parseClaudeLine(line, onEvent, toolCalls) {
   if (type === 'system') return null;
 
   // ── Tool use — Claude is calling an MCP tool ──────────
+  // We store the call by tool_use_id and wait for the matching tool_result
+  // so we can synthesize one architect-readable finding describing what was
+  // learned, not what was called. We also detect Jira-ordering violations
+  // here (a Jira write before any successful BigQuery dry run).
   if (type === 'tool_use' || (type === 'assistant' && parsed.message?.content?.some(c => c.type === 'tool_use'))) {
-    const toolContent = type === 'tool_use'
-      ? parsed
-      : parsed.message.content.find(c => c.type === 'tool_use');
+    const toolContents = type === 'tool_use'
+      ? [parsed]
+      : parsed.message.content.filter(c => c.type === 'tool_use');
 
-    const toolName = toolContent.name || toolContent.tool_name || 'unknown_tool';
-    const toolInput = toolContent.input || toolContent.tool_input || {};
+    for (const toolContent of toolContents) {
+      const toolName = toolContent.name || toolContent.tool_name || 'unknown_tool';
+      const toolInput = toolContent.input || toolContent.tool_input || {};
+      const toolId = toolContent.id || toolContent.tool_use_id || `${toolName}:${Date.now()}`;
 
-    if (!toolCalls.has(toolName)) {
-      toolCalls.add(toolName);
-      const stage = mapToolToStage(toolName);
+      const toolKey = `${toolName}:${JSON.stringify(toolInput).slice(0, 500)}`;
+      if (!toolCalls.has(toolKey)) {
+        toolCalls.add(toolKey);
+        // Pipeline tracker tick — keeps stages animating.
+        onEvent({
+          type: 'status',
+          stage: mapToolToStage(toolName),
+          message: mapToolToActivityMessage(toolName, toolInput),
+        });
+      }
 
-      onEvent({
-        type: 'status',
-        stage,
-        message: `Using tool: ${toolName}`,
-      });
-      onEvent({
-        type: 'tool_call',
-        tool: toolName,
-        args: toolInput,
-      });
+      // Stash for pairing with tool_result.
+      pendingToolCalls.set(toolId, { name: toolName, input: toolInput });
+
+      // Ordering check: a Jira write before any successful dry run is a
+      // SKILL violation. Surface it the moment it happens so the architect
+      // can see the timing problem, even if Claude later "fixes" it.
+      const lowerName = String(toolName).toLowerCase();
+      const isJiraWrite = lowerName.includes('jira') &&
+        (lowerName.includes('addcomment') ||
+         lowerName.includes('transitionjira') ||
+         lowerName.includes('editjira') ||
+         lowerName.includes('createjira'));
+      if (isJiraWrite && !orderingState.dryRunPassed && !orderingState.jiraCommentBeforeDryRun) {
+        orderingState.jiraCommentBeforeDryRun = true;
+        onEvent({
+          type: 'activity_event',
+          event: makeActivityEvent({
+            stage: 'validation',
+            type: 'error',
+            status: 'warning',
+            title: 'Jira Update Out of Order',
+            summary: 'Claude attempted a Jira write (comment or transition) before a successful BigQuery dry run. Per SKILL S12 / Strict Step Ordering, Jira completion is the final step and must follow a passing dry run. The comment may not reflect the validated SQL.',
+            evidence: [`Tool: ${toolName}`, 'Expected order: dry-run pass → Jira comment → transition → [SQL_READY].'],
+            source: 'bridge',
+          }),
+        });
+      }
     }
     return null;
   }
 
   // ── Tool result — MCP tool returned data ──────────────
-  if (type === 'tool_result' || type === 'user' && parsed.message?.content?.some(c => c.type === 'tool_result')) {
-    const toolContent = type === 'tool_result'
-      ? parsed
-      : parsed.message.content.find(c => c.type === 'tool_result');
+  // Pair with the stashed tool_use, emit one architect-readable finding,
+  // and update ordering state. Errors are flagged separately.
+  if (type === 'tool_result' || (type === 'user' && parsed.message?.content?.some(c => c.type === 'tool_result'))) {
+    const toolContents = type === 'tool_result'
+      ? [parsed]
+      : parsed.message.content.filter(c => c.type === 'tool_result');
 
-    const toolName = toolContent.name || toolContent.tool_name || 'unknown_tool';
-    const success = !toolContent.is_error;
-    const content = typeof toolContent.content === 'string'
-      ? toolContent.content
-      : JSON.stringify(toolContent.content || '');
+    for (const toolContent of toolContents) {
+      const toolId = toolContent.tool_use_id || toolContent.id;
+      const isError = !!toolContent.is_error;
+      const content = typeof toolContent.content === 'string'
+        ? toolContent.content
+        : JSON.stringify(toolContent.content || '');
 
-    const summary = content.length > 300
-      ? content.slice(0, 300) + '...'
-      : content;
+      const callRecord = toolId ? pendingToolCalls.get(toolId) : null;
+      const toolName = callRecord?.name || toolContent.name || toolContent.tool_name || 'unknown_tool';
+      const toolInput = callRecord?.input || {};
+      if (toolId) pendingToolCalls.delete(toolId);
 
-    onEvent({
-      type: 'tool_result',
-      tool: toolName,
-      success,
-      summary,
-    });
+      // Mark dry-run pass for ordering detector.
+      const lowerName = String(toolName).toLowerCase();
+      if (!isError && (lowerName.includes('execute_sql') || lowerName.includes('dry_run') || lowerName.includes('dryrun'))) {
+        orderingState.dryRunPassed = true;
+      }
+
+      const finding = semanticFindingFromToolPair(toolName, toolInput, content, isError);
+      if (finding) {
+        onEvent({
+          type: 'activity_event',
+          event: makeActivityEvent(finding),
+        });
+      }
+    }
     return null;
   }
 
@@ -592,20 +2153,17 @@ function parseClaudeLine(line, onEvent, toolCalls) {
   if (type === 'content_block_delta') {
     const delta = parsed.delta;
     if (delta?.type === 'text_delta' && delta.text) {
-      // Accumulate for final extraction but don't stream individual tokens
-      // (keeps UI cleaner — final message sent on close)
-      return { text: delta.text };
+      // Return as 'delta' so the caller can emit message_start + message_delta SSE events
+      return { delta: delta.text };
     }
     return null;
   }
 
-  // ── Content block start ──────────────────────────────
+  // ── Content block start / stop ───────────────────────
   if (type === 'content_block_start') return null;
+  if (type === 'content_block_stop')  return null;
 
-  // ── Content block stop ────────────────────────────────
-  if (type === 'content_block_stop') return null;
-
-  // ── Assistant message — full message chunk ────────────
+  // ── Assistant message — authoritative full text ───────
   if (type === 'assistant' && parsed.message) {
     const textParts = (parsed.message.content || [])
       .filter(c => c.type === 'text')
@@ -613,14 +2171,13 @@ function parseClaudeLine(line, onEvent, toolCalls) {
       .join('');
 
     if (textParts) {
-      return { text: textParts };
+      return { fullText: textParts };
     }
     return null;
   }
 
   // ── Result — final result from claude ─────────────────
   if (type === 'result') {
-    // Claude sometimes includes a conversation_id for resumption
     const conversationId = parsed.conversation_id || parsed.id || null;
     return { conversationId };
   }
@@ -652,9 +2209,11 @@ const server = http.createServer(async (req, res) => {
       activeRequests,
       maxConcurrent: MAX_CONCURRENT,
       activeSessions: sessions.size,
+      offlineDryRunEnabled: OFFLINE_DRY_RUN_ENABLED,
+      requireSqlChecksPass: REQUIRE_SQLCHECKS_PASS,
       port: PORT,
       uptime: Math.floor(process.uptime()),
-      mode: process.env.USE_CLAUDE_BRIDGE === 'true' ? 'claude_cli' : 'built_in_agent',
+      mode: 'claude_cli',
     }));
     return;
   }
@@ -674,33 +2233,29 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ── GET / ───────────────────────────────────────────────
-  if (req.method === 'GET' && req.url === '/') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      name: 'SQLForge Claude Bridge',
-      version: '1.0.0',
-      description: 'Claude Code CLI → SSE Proxy for SQLForge',
-      claude: findClaude() ? 'detected' : 'NOT FOUND',
-      endpoints: {
-        'POST /chat': 'Send prompt to Claude CLI, returns SSE stream',
-        'GET /health': 'Health check with Claude CLI status',
-        'GET /discover/jira-projects': 'List accessible Jira projects',
-        'GET /discover/bq-projects': 'List accessible BigQuery projects',
-        'DELETE /session/:id': 'Clear session history',
-      },
-      mcpServers: 'Configured via ~/.claude.json',
-    }));
-    return;
-  }
-
-  // ── POST /chat ──────────────────────────────────────────
+  // ── 404 ────────────────────────────────────────────────
+  // POST /chat
   if (req.method === 'POST' && req.url === '/chat') {
     let body = '';
+    let bodyTooLarge = false;
 
-    req.on('data', (chunk) => { body += chunk; });
+    req.on('data', (chunk) => {
+      if (bodyTooLarge) return;
+      body += chunk;
+      if (Buffer.byteLength(body, 'utf8') > MAX_REQUEST_BODY_BYTES) {
+        bodyTooLarge = true;
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          error: 'Request body is too large',
+          hint: `Reduce uploaded/context content or raise SQL_CURATOR_MAX_REQUEST_BODY_BYTES above ${MAX_REQUEST_BODY_BYTES}.`,
+        }));
+        req.destroy();
+      }
+    });
 
     req.on('end', async () => {
+      if (bodyTooLarge) return;
+
       let request;
       try {
         request = JSON.parse(body);
@@ -710,9 +2265,8 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      const { sessionId, messages, taskType, jiraInput, bqProjectId, contextText } = request;
+      const { sessionId, messages, taskType, bqProjectId, bqDatasetId, dryRun } = request;
 
-      // Validate
       if (!messages || !Array.isArray(messages) || messages.length === 0) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'messages array is required' }));
@@ -725,8 +2279,38 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      // Check claude availability
-      if (!findClaude()) {
+      if (!taskType || typeof taskType !== 'string') {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'taskType is required' }));
+        return;
+      }
+
+      const allowedTaskTypes = new Set(['auto_detect', 'sql_generation', 'legacy_sql_conversion', 'github_deploy']);
+      if (!allowedTaskTypes.has(taskType)) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Unsupported taskType' }));
+        return;
+      }
+
+      const targetScopeError = validateTargetScope(bqProjectId, bqDatasetId);
+      if (targetScopeError) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: targetScopeError }));
+        return;
+      }
+
+      const requestedOfflineDryRun = dryRun === true || dryRun === 'true';
+      if (requestedOfflineDryRun && !OFFLINE_DRY_RUN_ENABLED) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          error: 'Offline dry run is disabled',
+          hint: 'Set SQL_CURATOR_ENABLE_OFFLINE_DRY_RUN=true only for local UI validation without Claude Code.',
+        }));
+        return;
+      }
+      const isOfflineDryRun = requestedOfflineDryRun && OFFLINE_DRY_RUN_ENABLED;
+
+      if (!isOfflineDryRun && !findClaude()) {
         res.writeHead(503, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           error: 'Claude CLI not found',
@@ -736,47 +2320,66 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      // Set up SSE response
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache, no-transform',
         Connection: 'keep-alive',
         'X-Accel-Buffering': 'no',
       });
+      if (res.socket) res.socket.setNoDelay(true);
 
+      // Bench timer to confirm whether events leave the bridge progressively
+      // or get batched at the end. Look at the bridge terminal output: each
+      // line prints the ms since this request started.
+      const requestStartMs = Date.now();
       const sseSend = (event, data) => {
         try {
+          // Single write — some Node versions can hold sub-chunk writes in the
+          // outbound buffer. Combining keeps the frame atomic.
           res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+          // Best-effort flush. cork/uncork forces accumulated writes out.
+          if (typeof res.flush === 'function') {
+            res.flush();
+          } else if (res.socket && typeof res.socket.uncork === 'function') {
+            res.socket.uncork();
+          }
+          const elapsed = Date.now() - requestStartMs;
+          // Skip noisy heartbeat status pings in the log.
+          if (event !== 'message_delta') {
+            console.log(`  [sse +${String(elapsed).padStart(5, ' ')}ms] ${event}${data && data.stage ? ` stage=${data.stage}` : ''}${data && data.event && data.event.title ? ` "${data.event.title}"` : ''}`);
+          }
         } catch {
-          // Client disconnected
+          // Client disconnected.
         }
       };
 
-      // Update session history
       const session = getSession(sessionId);
       session.lastActivity = Date.now();
       trimSession(sessionId);
 
-      // Pipeline progression
-      sseSend('status', { stage: 'intake', message: 'Connecting to Claude Code...', timestamp: Date.now() });
+      sseSend('status', { stage: 'intake', status: 'active', message: 'Connecting to Claude Code...', timestamp: Date.now() });
 
       try {
-        // Build prompt from request
         const prompt = buildPrompt(request);
 
-        // Run claude CLI
-        sseSend('status', { stage: 'analysis', message: 'Claude is analyzing your request...', timestamp: Date.now() });
+        sseSend('status', { stage: 'intake', status: 'completed', message: 'Input delivered to Claude Code.', timestamp: Date.now() });
+        sseSend('status', { stage: 'analysis', status: 'active', message: 'Claude is analyzing your request...', timestamp: Date.now() });
 
         const eventHandler = (event) => {
           switch (event.type) {
             case 'status':
+              if (event.stage) currentHeartbeatStage = event.stage;
+              if (event.status === 'completed' && event.stage === 'ready') isTerminalStage = true;
               sseSend('status', { ...event, timestamp: Date.now() });
               break;
-            case 'tool_call':
-              sseSend('tool_call', { ...event, timestamp: Date.now() });
+            case 'activity_event':
+              sseSend('activity_event', { event: makeActivityEvent(event.event), timestamp: Date.now() });
               break;
-            case 'tool_result':
-              sseSend('tool_result', { ...event, timestamp: Date.now() });
+            case 'message_start':
+              sseSend('message_start', { timestamp: Date.now() });
+              break;
+            case 'message_delta':
+              sseSend('message_delta', { content: event.content, timestamp: Date.now() });
               break;
             case 'message':
               sseSend('message', { ...event, timestamp: Date.now() });
@@ -785,43 +2388,84 @@ const server = http.createServer(async (req, res) => {
               sseSend('clarification', { ...event, timestamp: Date.now() });
               break;
             case 'sql':
-              if (event.sql) {
-                sseSend('sql', { ...event, timestamp: Date.now() });
-              }
+              sseSend('sql', { sql: event.sql, fileName: event.fileName, timestamp: Date.now() });
               break;
             case 'stm':
-              if (event.artifact) {
-                sseSend('stm', { ...event, timestamp: Date.now() });
+              sseSend('stm', { artifact: event.artifact, timestamp: Date.now() });
+              break;
+            case 'validation_summary':
+              for (const activityEvent of activityEventsFromValidationSummary(event.summary)) {
+                sseSend('activity_event', { event: activityEvent, timestamp: Date.now() });
               }
+              sseSend('validation_summary', { summary: event.summary, timestamp: Date.now() });
               break;
             case 'done':
               sseSend('done', { ...event, timestamp: Date.now() });
               break;
+            case 'error':
+              sseSend('activity_event', {
+                event: makeActivityEvent({
+                  stage: 'validation',
+                  type: 'error',
+                  status: 'failed',
+                  title: 'Claude Code Error',
+                  summary: event.message || 'Claude Code returned an error.',
+                  details: event.hint ? [event.hint] : undefined,
+                  source: 'bridge',
+                }),
+                timestamp: Date.now(),
+              });
+              sseSend('error', { ...event, timestamp: Date.now() });
+              break;
           }
         };
 
-        const result = await runClaude(prompt, sessionId, request, eventHandler);
+        let lastEventTime = Date.now();
+        let currentHeartbeatStage = 'analysis';
+        let isTerminalStage = false;
+        const trackingHandler = (event) => {
+          lastEventTime = Date.now();
+          eventHandler(event);
+        };
+        const heartbeatInterval = setInterval(() => {
+          const silenceSec = Math.round((Date.now() - lastEventTime) / 1000);
+          if (silenceSec >= 25 && !isTerminalStage) {
+            sseSend('status', {
+              stage: currentHeartbeatStage,
+              status: 'active',
+              message: `Claude Code is still working (${silenceSec}s without a new event).`,
+              timestamp: Date.now(),
+            });
+          }
+        }, 30000);
 
-        // Store successful exchange in session
-        const lastUserMsg = messages[messages.length - 1];
-        if (lastUserMsg) {
-          session.messages.push({ role: 'user', content: lastUserMsg.content });
+        const result = isOfflineDryRun
+          ? runOfflineDryRun(request, trackingHandler)
+          : await runClaude(prompt, sessionId, request, trackingHandler).finally(() => {
+              clearInterval(heartbeatInterval);
+            });
+
+        if (isOfflineDryRun) {
+          clearInterval(heartbeatInterval);
         }
-
-        if (result.assistantText) {
-          session.messages.push({ role: 'assistant', content: result.assistantText });
-        }
-
-        // Trim session history
-        trimSession(sessionId);
 
         console.log(`  [bridge] Session ${sessionId.slice(0, 8)}: ${result.success ? 'success' : 'completed'}${result.clarification ? ' (needs clarification)' : ''}`);
-
       } catch (err) {
         const message = err.message || 'Unknown error';
         console.error(`  [bridge] Error for session ${sessionId.slice(0, 8)}:`, message);
 
         sseSend('status', { stage: 'idle', message: 'Error occurred', timestamp: Date.now() });
+        sseSend('activity_event', {
+          event: makeActivityEvent({
+            stage: 'validation',
+            type: 'error',
+            status: 'failed',
+            title: 'Bridge Error',
+            summary: message,
+            source: 'bridge',
+          }),
+          timestamp: Date.now(),
+        });
         sseSend('error', { message, timestamp: Date.now() });
         sseSend('done', { success: false, timestamp: Date.now() });
       }
@@ -832,124 +2476,10 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ── GET /discover/jira-projects ──────────────────────
-  if (req.method === 'GET' && req.url === '/discover/jira-projects') {
-    // Check cache first
-    const cached = getCachedProjects('jira');
-    if (cached) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ projects: cached, cached: true }));
-      return;
-    }
-
-    // Check Claude CLI
-    if (!findClaude()) {
-      res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Claude CLI not found' }));
-      return;
-    }
-
-    console.log('  [discover] Fetching Jira projects...');
-
-    try {
-      const result = await runQuickClaude(
-        'Use your Jira MCP tool to list all accessible Jira projects. ' +
-        'Return ONLY a valid JSON array of objects with "key" and "name" fields, like: ' +
-        '[{"key":"PROJ","name":"Project Name"}]. ' +
-        'Do NOT include any other text, explanation, or markdown code blocks. Just the raw JSON array.'
-      );
-
-      // Try to parse JSON from the response
-      let projects = [];
-      const jsonMatch = result.text.match(/\[[\s\S]*\]/);
-      if (jsonMatch) {
-        try {
-          projects = JSON.parse(jsonMatch[0]);
-          if (!Array.isArray(projects)) projects = [];
-          // Validate structure
-          projects = projects.filter(p => p.key).map(p => ({
-            key: String(p.key),
-            name: String(p.name || p.key),
-          }));
-        } catch { /* parse failed */ }
-      }
-
-      // Cache the result
-      if (projects.length > 0) {
-        setCachedProjects('jira', projects);
-        console.log(`  [discover] Cached ${projects.length} Jira projects`);
-      }
-
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ projects, cached: false }));
-    } catch (err) {
-      console.error('  [discover] Jira projects error:', err.message);
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: err.message, projects: [] }));
-    }
-    return;
-  }
-
-  // ── GET /discover/bq-projects ────────────────────────
-  if (req.method === 'GET' && req.url === '/discover/bq-projects') {
-    // Check cache first
-    const cached = getCachedProjects('bq');
-    if (cached) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ projects: cached, cached: true }));
-      return;
-    }
-
-    // Check Claude CLI
-    if (!findClaude()) {
-      res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Claude CLI not found' }));
-      return;
-    }
-
-    console.log('  [discover] Fetching BigQuery projects...');
-
-    try {
-      const result = await runQuickClaude(
-        'Use your BigQuery MCP tool to list all accessible Google Cloud projects that have BigQuery datasets. ' +
-        'Return ONLY a valid JSON array of project ID strings, like: ["project-1","project-2"]. ' +
-        'Do NOT include any other text, explanation, or markdown code blocks. Just the raw JSON array.'
-      );
-
-      // Try to parse JSON from the response
-      let projects = [];
-      const jsonMatch = result.text.match(/\[[\s\S]*\]/);
-      if (jsonMatch) {
-        try {
-          const parsed = JSON.parse(jsonMatch[0]);
-          if (Array.isArray(parsed)) {
-            // Handle both string arrays and object arrays
-            projects = parsed.map(p => typeof p === 'string' ? p : p.id || p.projectId || p.name).filter(Boolean);
-          }
-        } catch { /* parse failed */ }
-      }
-
-      // Cache the result
-      if (projects.length > 0) {
-        setCachedProjects('bq', projects);
-        console.log(`  [discover] Cached ${projects.length} BQ projects`);
-      }
-
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ projects, cached: false }));
-    } catch (err) {
-      console.error('  [discover] BQ projects error:', err.message);
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: err.message, projects: [] }));
-    }
-    return;
-  }
-
-  // ── 404 ────────────────────────────────────────────────
   res.writeHead(404, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({
     error: 'Not found',
-    endpoints: ['POST /chat', 'GET /health', 'GET /discover/jira-projects', 'GET /discover/bq-projects', 'DELETE /session/:id'],
+    endpoints: ['POST /chat', 'GET /health', 'DELETE /session/:id'],
   }));
 });
 
@@ -958,7 +2488,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, '127.0.0.1', () => {
   console.log('');
   console.log('  ╔══════════════════════════════════════════════╗');
-  console.log('  ║   SQLForge Claude Bridge v1.0                ║');
+  console.log('  ║   SQL Curator Claude Bridge v1.0             ║');
   console.log('  ║   Claude Code CLI → SSE Proxy                ║');
   console.log('  ╠══════════════════════════════════════════════╣');
   console.log(`  ║   Port:          ${String(PORT).padEnd(27)}║`);
@@ -971,8 +2501,6 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log('  ║     POST /chat         Send prompt → Claude   ║');
   console.log('  ║     GET  /health       Health check           ║');
   console.log('  ║     DELETE /session/:id Clear session history ║');
-  console.log('  ║     GET  /discover/jira-projects  List Jira projects    ║');
-  console.log('  ║     GET  /discover/bq-projects    List BQ projects     ║');
   console.log('  ╠══════════════════════════════════════════════╣');
   console.log('  ║   MCP Tools: Jira, BigQuery, GitHub            ║');
   console.log('  ║   Config:    ~/.claude.json                    ║');
@@ -992,7 +2520,15 @@ server.listen(PORT, '127.0.0.1', () => {
 
 function gracefulShutdown(signal) {
   console.log(`\n  Bridge shutting down (${signal})...`);
-  // Kill any active Claude processes
+
+  // Kill all tracked Claude CLI child processes to prevent orphans
+  for (const proc of spawnedProcs) {
+    if (!proc.killed) {
+      try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+    }
+  }
+  spawnedProcs.clear();
+
   server.close(() => {
     console.log('  Bridge stopped.');
     process.exit(0);

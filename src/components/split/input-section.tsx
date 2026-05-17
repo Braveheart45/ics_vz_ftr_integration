@@ -10,6 +10,7 @@ import { Sparkles, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { postAndStream, processSSEStream } from '@/lib/sse-client';
+import { validateBqDatasetId, validateBqProjectId } from '@/lib/target-scope';
 
 // ── Component ─────────────────────────────────────────────────
 export function InputSection() {
@@ -37,22 +38,51 @@ export function InputSection() {
       parts.push(`[BigQuery] Project: ${bqProjectInput.projectId}`);
     }
 
+    if (bqProjectInput.datasetId.trim()) {
+      parts.push(`[BigQuery] Dataset: ${bqProjectInput.datasetId}`);
+      parts.push(`[BigQuery Scope] Schema reconciliation and any inference must stay within ${bqProjectInput.projectId}.${bqProjectInput.datasetId}. Do not crawl or infer from other datasets.`);
+    }
+
     if (contextText.trim()) {
       parts.push(contextText.trim());
     }
 
     if (uploadedFiles.length > 0) {
-      const fileNames = uploadedFiles.map((f) => f.name).join(', ');
-      parts.push(`[Attached files: ${fileNames}]`);
+      const fileParts = uploadedFiles.flatMap((f) => {
+        if (!f.content) return [];
+        const body = f.content.length > 8000
+          ? f.content.slice(0, 8000) + '\n...(truncated)'
+          : f.content;
+        return [`[File: ${f.name}]\n${body}`];
+      });
+      if (fileParts.length > 0) {
+        parts.push(fileParts.join('\n\n'));
+      }
     }
 
     return parts.length > 0 ? parts.join('\n\n') : null;
   }, [jiraInput, bqProjectInput, contextText, uploadedFiles]);
 
   const handleSubmit = useCallback(async () => {
-    // Mandatory: BigQuery project
     if (!bqProjectInput.projectId.trim()) {
-      toast.error('BigQuery Project is required. Please select a project.');
+      toast.error('Target BigQuery Project ID is required.');
+      return;
+    }
+
+    const projectValidation = validateBqProjectId(bqProjectInput.projectId);
+    if (!projectValidation.ok) {
+      toast.error(projectValidation.error);
+      return;
+    }
+
+    if (!bqProjectInput.datasetId.trim()) {
+      toast.error('Target BigQuery Dataset ID is required.');
+      return;
+    }
+
+    const datasetValidation = validateBqDatasetId(bqProjectInput.datasetId);
+    if (!datasetValidation.ok) {
+      toast.error(datasetValidation.error);
       return;
     }
 
@@ -72,11 +102,17 @@ export function InputSection() {
     // Add user message to chat
     addMessage({ role: 'user', content: userContent });
 
-    // Start agent
+    // Start agent — clear all prior-run state
     setIsSubmitting(true);
+    useAppStore.getState().clearPipeline();
+    useAppStore.getState().clearActivityEvents();
+    useAppStore.getState().clearStreamingContent();
+    useAppStore.getState().setStmArtifact(null);
+    useAppStore.getState().setValidationSummary(null);
+    useAppStore.getState().setPendingClarification(null);
+    useAppStore.getState().clearClarificationHistory();
     useAppStore.getState().setStreaming(true);
     useAppStore.getState().setAgentRunning(true);
-    useAppStore.getState().clearToolLogs();
 
     const abort = new AbortController();
     abortRef.current = abort;
@@ -88,16 +124,27 @@ export function InputSection() {
         taskType,
         jiraInput: jiraInput.project.trim() ? jiraInput : undefined,
         bqProjectId: bqProjectInput.projectId.trim() || undefined,
+        bqDatasetId: bqProjectInput.datasetId.trim() || undefined,
         contextText: contextText.trim() || undefined,
       }, abort.signal);
 
       await processSSEStream(res);
 
-      toast.success('SQL generation complete');
+      const state = useAppStore.getState();
+      if (state.sqlOutput?.sql) {
+        toast.success('SQL generation complete');
+      } else if (state.pendingClarification) {
+        toast.info('Claude needs clarification before SQL generation.');
+      }
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return;
+      // Reset agent state in case processSSEStream never ran (network error before response)
+      useAppStore.getState().setStreaming(false);
+      useAppStore.getState().setAgentRunning(false);
       const msg = error instanceof Error ? error.message : 'Something went wrong';
-      if (!useAppStore.getState().messages.findLast((m) => m.role === 'assistant')?.content.includes('Error')) {
+      const msgs = useAppStore.getState().messages;
+      const lastAssistant = [...msgs].reverse().find((m) => m.role === 'assistant');
+      if (!lastAssistant?.content.includes('Error')) {
         addMessage({ role: 'assistant', content: `Error: ${msg}. Please try again.` });
       }
       toast.error('Failed to generate. Check the chat for details.');
@@ -108,18 +155,9 @@ export function InputSection() {
   }, [buildUserMessage, messages, sessionId, taskType, jiraInput, bqProjectInput, contextText, addMessage]);
 
   return (
-    <div className="flex flex-col gap-4 animate-fade-in-up" style={{ animationDelay: '100ms' }}>
-      {/* Jira Project, Story No. & BigQuery Project */}
+    <div className="flex flex-col gap-3.5 animate-fade-in-up" style={{ animationDelay: '100ms' }}>
+      {/* Jira Project, Story No. & BigQuery target scope */}
       <JiraInput />
-
-      {/* Divider */}
-      <div className="flex items-center gap-3">
-        <div className="h-px flex-1 bg-gradient-to-r from-transparent via-border to-transparent" />
-        <span className="text-[10px] font-semibold text-foreground/60 uppercase tracking-[0.1em]">
-          or
-        </span>
-        <div className="h-px flex-1 bg-gradient-to-r from-transparent via-border to-transparent" />
-      </div>
 
       {/* File Upload */}
       <FileUpload />
@@ -132,7 +170,7 @@ export function InputSection() {
         onClick={handleSubmit}
         disabled={isSubmitting || isAgentRunning}
         className={cn(
-          'w-full h-9.5 font-medium tracking-[-0.01em] relative overflow-hidden',
+          'w-full h-9.5 font-medium tracking-[-0.01em] relative overflow-hidden rounded-lg',
           'shadow-[0_1px_3px_0_oklch(0.55_0.15_264/0.2),inset_0_1px_0_0_oklch(1_0_0/0.1)]',
           'transition-all duration-200 hover:shadow-[0_2px_8px_0_oklch(0.55_0.15_264/0.3),inset_0_1px_0_0_oklch(1_0_0/0.1)] hover:scale-[1.01] active:scale-[0.99]',
           'group'

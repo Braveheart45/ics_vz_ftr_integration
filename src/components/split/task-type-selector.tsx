@@ -48,14 +48,14 @@ export function TaskTypeSelector() {
   }, [activeIdx]);
 
   return (
-    <div className="flex items-center justify-center px-4 py-2.5 animate-fade-in-up">
+    <div className="flex h-full items-center justify-center px-3 py-0 animate-fade-in-up">
       <div
         ref={containerRef}
-        className="relative flex items-center rounded-xl bg-muted/70 p-1 shadow-[inset_0_1px_2px_0_oklch(0_0_0/0.04)]"
+        className="relative flex items-center rounded-lg border border-border/50 bg-muted/40 p-1 shadow-[inset_0_1px_2px_0_oklch(0_0_0/0.03)]"
       >
         {/* Sliding indicator pill — GCP Blue for active */}
         <div
-          className="absolute top-1 z-0 h-[calc(100%-8px)] rounded-lg bg-[#4285F4] text-white shadow-[0_1px_4px_0_oklch(0.59_0.19_264/0.35)] transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
+          className="absolute top-1 z-0 h-[calc(100%-8px)] rounded-md bg-[#4285F4] text-white shadow-[0_1px_4px_0_oklch(0.59_0.19_264/0.25)] transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
           style={indicatorStyle}
         />
 
@@ -68,7 +68,7 @@ export function TaskTypeSelector() {
               type="button"
               onClick={() => setTaskType(seg.value)}
               className={cn(
-                'relative z-10 flex items-center justify-center gap-1.5 rounded-lg px-4 py-1.5 text-[12px] font-semibold tracking-[-0.01em] transition-all duration-200',
+                'relative z-10 flex items-center justify-center gap-1.5 rounded-md px-4 py-1.5 text-[12px] font-medium tracking-[-0.01em] transition-all duration-200',
                 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1',
                 'hover:scale-[1.02] active:scale-[0.97]',
                 isActive
@@ -81,7 +81,7 @@ export function TaskTypeSelector() {
               {/* Orange icon always — override text color for icon */}
               <span className={cn(
                 'transition-colors duration-200',
-                isActive ? 'text-white' : 'text-[#F97316]'
+                isActive ? 'text-white' : 'text-muted-foreground'
               )}>
                 {seg.icon}
               </span>

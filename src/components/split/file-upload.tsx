@@ -4,6 +4,8 @@ import { useState, useRef, useCallback, type DragEvent } from 'react';
 import { useAppStore } from '@/stores/use-app-store';
 import { Upload, X, FileText } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { createClientId } from '@/lib/id';
+import { toast } from 'sonner';
 
 // ── Helpers ───────────────────────────────────────────────────
 
@@ -13,7 +15,12 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-const SUPPORTED_FORMATS = ['TXT', 'CSV', 'XLSX', 'DOCX', 'PPTX', 'PDF', 'MD'];
+const SUPPORTED_FORMATS = ['TXT', 'CSV', 'JSON', 'MD', 'SQL'];
+const MAX_FILES = 5;
+const MAX_FILE_SIZE_BYTES = 1 * 1024 * 1024;
+
+// File extensions whose content can be read as plain text
+const TEXT_EXTENSIONS = new Set(['.txt', '.csv', '.json', '.md', '.sql']);
 
 // ── Component ─────────────────────────────────────────────────
 export function FileUpload() {
@@ -27,17 +34,46 @@ export function FileUpload() {
   const handleFiles = useCallback(
     (fileList: FileList | null) => {
       if (!fileList) return;
+      let acceptedCount = uploadedFiles.length;
       Array.from(fileList).forEach((file) => {
-        addFile({
-          id: crypto.randomUUID(),
-          name: file.name,
-          size: file.size,
-          type: file.type,
+        if (acceptedCount >= MAX_FILES) {
+          toast.error(`Upload limit reached. Add up to ${MAX_FILES} text files per run.`);
+          return;
+        }
+
+        const ext = file.name.toLowerCase().match(/\.[^.]+$/)?.[0] ?? '';
+        if (!TEXT_EXTENSIONS.has(ext)) {
+          toast.error(`${file.name} is not supported. Upload TXT, CSV, JSON, MD, or SQL only.`);
+          return;
+        }
+
+        if (file.size > MAX_FILE_SIZE_BYTES) {
+          toast.error(`${file.name} is too large. Maximum file size is ${formatFileSize(MAX_FILE_SIZE_BYTES)}.`);
+          return;
+        }
+
+        const base = {
+          id:         createClientId('file'),
+          name:       file.name,
+          size:       file.size,
+          type:       file.type,
           uploadedAt: new Date().toISOString(),
-        });
+        };
+        acceptedCount += 1;
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          addFile({
+            ...base,
+            content: typeof e.target?.result === 'string' ? e.target.result : '',
+          });
+        };
+        reader.onerror = () => {
+          toast.error(`Could not read ${file.name} as text.`);
+        };
+        reader.readAsText(file);
       });
     },
-    [addFile]
+    [addFile, uploadedFiles.length]
   );
 
   const handleDrop = useCallback(
@@ -85,7 +121,7 @@ export function FileUpload() {
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         className={cn(
-          'flex cursor-pointer flex-col items-center justify-center gap-1.5 rounded-lg border transition-all duration-200',
+          'flex min-h-[84px] cursor-pointer flex-col items-center justify-center gap-1.5 rounded-lg border bg-background transition-all duration-200',
           'hover:scale-[1.005]',
           isDragOver
             ? 'border-primary/30 bg-primary/[0.03] shadow-[0_0_0_1px_oklch(0.55_0.15_264/0.1)] scale-[1.01]'
@@ -93,22 +129,22 @@ export function FileUpload() {
         )}
       >
         <div className={cn(
-          'flex size-7 items-center justify-center rounded-md transition-all duration-200',
+          'flex size-7 items-center justify-center rounded-md border border-border/50 transition-all duration-200',
           isDragOver ? 'bg-primary/10 scale-110' : 'bg-muted/50 group-hover:scale-105'
         )}>
           <Upload className="size-3.5 text-foreground/50" />
         </div>
         <span className="text-xs font-medium text-foreground/80">
-          Drop files here or <span className="font-bold text-foreground">browse</span>
+          Drop files here or <span className="font-semibold text-foreground">browse</span>
         </span>
-        <span className="text-[10px] font-semibold text-foreground/60 tracking-wide">
-          {SUPPORTED_FORMATS.join(' · ')}
+        <span className="text-[10px] font-medium text-muted-foreground tracking-wide">
+          {SUPPORTED_FORMATS.join(' · ')} · max {MAX_FILES} files · {formatFileSize(MAX_FILE_SIZE_BYTES)} each
         </span>
         <input
           ref={inputRef}
           type="file"
           multiple
-          accept=".txt,.csv,.xlsx,.docx,.pptx,.pdf,.md"
+          accept=".txt,.csv,.json,.md,.sql"
           onChange={handleInputChange}
           className="sr-only"
           aria-label="Upload files"
