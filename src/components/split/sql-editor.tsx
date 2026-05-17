@@ -486,7 +486,7 @@ export function SqlEditor() {
           className="fixed inset-0 bg-black/50 backdrop-blur-sm z-40"
           onClick={toggleMaximize}
         />
-        <div className="fixed inset-4 z-50 rounded-xl overflow-hidden shadow-2xl">{editorContent}</div>
+        <div className="fixed inset-0 z-50 overflow-hidden shadow-2xl">{editorContent}</div>
       </>
     );
   }

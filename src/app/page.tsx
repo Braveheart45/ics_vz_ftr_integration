@@ -4,6 +4,11 @@ import { useEffect } from 'react';
 import { LeftPanel } from '@/components/split/left-panel';
 import { RightPanel } from '@/components/split/right-panel';
 import { ValidationSummaryPane } from '@/components/split/validation-summary-pane';
+import {
+  ResizablePanelGroup,
+  ResizablePanel,
+  ResizableHandle,
+} from '@/components/ui/resizable';
 import { AlertTriangle, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -150,23 +155,32 @@ export default function Home() {
       </header>
 
       {/* ── Three-Pane Layout ───────────────────────────────── */}
-      <div className="flex min-h-0 flex-1 flex-col lg:grid lg:grid-cols-[minmax(0,40%)_minmax(0,30%)_minmax(0,30%)]">
-        {/* Left — SQL Output */}
-        <div className="animate-slide-in-left relative flex min-h-0 min-w-0 flex-col border-r border-border/50">
-          <LeftPanel />
-        </div>
+      <div className="flex min-h-0 flex-1">
+        <ResizablePanelGroup
+          direction="horizontal"
+          autoSaveId="sql-curator-main-layout"
+        >
+          {/* Left — SQL Output */}
+          <ResizablePanel defaultSize={40} minSize={15} className="animate-slide-in-left">
+            <LeftPanel />
+          </ResizablePanel>
 
-        {/* Middle — Claude Activity */}
-        <div className="relative flex min-h-0 min-w-0 flex-col border-r border-border/50 bg-background">
-          <div className="h-full min-h-0 p-2.5">
-            <ValidationSummaryPane />
-          </div>
-        </div>
+          <ResizableHandle withHandle />
 
-        {/* Right — Intake & Clarification Assistant */}
-        <div className="animate-slide-in-right relative flex min-h-0 min-w-0 flex-col">
-          <RightPanel />
-        </div>
+          {/* Middle — Activity Feed */}
+          <ResizablePanel defaultSize={30} minSize={15}>
+            <div className="h-full min-h-0 p-2.5">
+              <ValidationSummaryPane />
+            </div>
+          </ResizablePanel>
+
+          <ResizableHandle withHandle />
+
+          {/* Right — Intake & Clarification */}
+          <ResizablePanel defaultSize={30} minSize={15} className="animate-slide-in-right">
+            <RightPanel />
+          </ResizablePanel>
+        </ResizablePanelGroup>
       </div>
     </div>
   );

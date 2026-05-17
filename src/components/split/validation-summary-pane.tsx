@@ -189,7 +189,7 @@ export function ValidationSummaryPane() {
     <section
       className={cn(
         'h-full min-h-0 overflow-hidden rounded-xl border border-border/60 bg-background shadow-[0_2px_8px_0_oklch(0_0_0/0.04),0_1px_2px_0_oklch(0_0_0/0.03)]',
-        isExpanded && 'fixed inset-4 z-50 shadow-2xl',
+        isExpanded && 'fixed inset-0 z-50 shadow-2xl',
       )}
     >
       <div className="flex h-full min-h-0 flex-col">
