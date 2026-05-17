@@ -58,11 +58,11 @@ export function dispatchSSEEvent(event: SSEEvent): void {
       break;
 
     case 'message_start':
-      store.clearStreamingContent();
       break;
 
     case 'message_delta':
-      store.appendStreamingContent(event.content);
+      // The final 'message' event is what actually updates the assistant
+      // bubble; deltas are noise here but still flow over the wire.
       break;
 
     case 'message': {
@@ -106,17 +106,15 @@ export function dispatchSSEEvent(event: SSEEvent): void {
           store.addMessage({ role: 'assistant', content: errorContent });
         }
       }
-      // Attribute the error to whatever stage was last reported by the
-      // bridge — not hardcoded to 'validation'. Hardcoding fakes prior
-      // stages as completed via the previousWorkflowStages cascade and
-      // paints a red Validate cell for every error, including bridge
-      // connection failures that never reached validation.
+      // Attribute the error only to a stage that was actually in flight.
+      // Pre-stage failures (bridge unreachable, validation rejection before
+      // intake starts) leave the pipeline untouched so we don't paint a
+      // red cell on a stage that never ran.
       {
         const liveStage = useAppStore.getState().currentStage;
-        const errorStage = (liveStage === 'idle' || liveStage === 'ready')
-          ? 'intake'
-          : liveStage;
-        store.setStage(errorStage, event.message, 'failed');
+        if (liveStage !== 'idle' && liveStage !== 'ready') {
+          store.setStage(liveStage, event.message, 'failed');
+        }
       }
       store.setStreaming(false);
       store.setAgentRunning(false);
@@ -124,7 +122,6 @@ export function dispatchSSEEvent(event: SSEEvent): void {
       break;
 
     case 'clarification':
-      store.clearStreamingContent();
       store.setPendingClarification({
         message: event.message,
         explanation: event.explanation,

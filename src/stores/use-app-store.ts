@@ -48,14 +48,11 @@ interface AppState {
   // ── Chat / Conversation ─────────────────────────────────
   messages: ChatMessage[];
   isStreaming: boolean;
-  streamingContent: string;
   addMessage: (message: Omit<ChatMessage, 'id' | 'timestamp'>) => void;
   updateLastAssistantMessage: (content: string) => void;
   appendToLastAssistantMessage: (content: string) => void;
   setStreaming: (streaming: boolean) => void;
   clearMessages: () => void;
-  appendStreamingContent: (chunk: string) => void;
-  clearStreamingContent: () => void;
 
   // ── SQL Output ──────────────────────────────────────────
   sqlOutput: SqlOutput | null;
@@ -125,7 +122,6 @@ const initialState = {
 
   messages: [] as ChatMessage[],
   isStreaming: false,
-  streamingContent: '',
 
   sqlOutput: null as SqlOutput | null,
   isMaximized: false,
@@ -146,6 +142,13 @@ const initialState = {
 
   sessionId: '__pending__',
 };
+
+// Cap the in-memory chat history. We re-send every kept message to the
+// bridge on each turn, so unbounded growth blows up both render cost and
+// wire payload. The bridge already trims to MAX_HISTORY_MESSAGES=20 on its
+// side; keep a slightly larger buffer client-side so a few extra messages
+// can be inspected by the user before truncation.
+const MAX_CLIENT_MESSAGES = 40;
 
 const WORKFLOW_ORDER: WorkflowStage[] = [
   'intake',
@@ -221,9 +224,12 @@ export const useAppStore = create<AppState>((set) => ({
       id: createClientId('message'),
       timestamp: new Date().toISOString(),
     };
-    set((state) => ({
-      messages: [...state.messages, newMessage],
-    }));
+    set((state) => {
+      const next = [...state.messages, newMessage];
+      return {
+        messages: next.length > MAX_CLIENT_MESSAGES ? next.slice(-MAX_CLIENT_MESSAGES) : next,
+      };
+    });
   },
 
   updateLastAssistantMessage: (content) => {
@@ -255,14 +261,6 @@ export const useAppStore = create<AppState>((set) => ({
 
   clearMessages: () => {
     set({ messages: [] });
-  },
-
-  appendStreamingContent: (chunk) => {
-    set((state) => ({ streamingContent: state.streamingContent + chunk }));
-  },
-
-  clearStreamingContent: () => {
-    set({ streamingContent: '' });
   },
 
   // ── SQL Output ──────────────────────────────────────────
@@ -449,6 +447,6 @@ export const useAppStore = create<AppState>((set) => ({
   },
 
   resetSession: () => {
-    set({ ...initialState, sessionId: generateSessionId(), activeStages: [], completedStages: [], stageHistory: [], streamingContent: '', validationSummary: null, activityEvents: [], clarificationHistory: [] });
+    set({ ...initialState, sessionId: generateSessionId(), activeStages: [], completedStages: [], stageHistory: [], validationSummary: null, activityEvents: [], clarificationHistory: [] });
   },
 }));

@@ -106,7 +106,6 @@ export function InputSection() {
     setIsSubmitting(true);
     useAppStore.getState().clearPipeline();
     useAppStore.getState().clearActivityEvents();
-    useAppStore.getState().clearStreamingContent();
     useAppStore.getState().setStmArtifact(null);
     useAppStore.getState().setValidationSummary(null);
     useAppStore.getState().setPendingClarification(null);

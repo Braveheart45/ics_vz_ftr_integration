@@ -102,6 +102,9 @@ export function ChatPanel() {
       addMessage({ role: 'user', content: trimmed });
 
       useAppStore.getState().setPendingClarification(null);
+      // Drop the prior round's validation summary so stale pass/fail badges
+      // don't bleed into the new run before its own summary arrives.
+      useAppStore.getState().setValidationSummary(null);
       useAppStore.getState().setStreaming(true);
       useAppStore.getState().setAgentRunning(true);
 

@@ -1454,6 +1454,88 @@ function stripInlineActivities(text) {
   return String(text || '').replace(/\n?```activity\s*\n[\s\S]*?\n```\n?/g, '\n').trim();
 }
 
+// ── Sanitised env for Claude child ─────────────────────────────
+// The Claude CLI inherits whatever it needs from a deliberate whitelist
+// rather than the full parent process.env. This avoids leaking secrets that
+// happen to live in the bridge operator's shell (cloud keys, DB creds,
+// tokens for unrelated services) into a process that builds prompts and
+// invokes MCP servers.
+
+const CLAUDE_ENV_ALLOWLIST = new Set([
+  'PATH',
+  'HOME',
+  'USERPROFILE',
+  'APPDATA',
+  'LOCALAPPDATA',
+  'PROGRAMFILES',
+  'PROGRAMFILES(X86)',
+  'PROGRAMDATA',
+  'SYSTEMROOT',
+  'SYSTEMDRIVE',
+  'WINDIR',
+  'TEMP',
+  'TMP',
+  'TMPDIR',
+  'LANG',
+  'LC_ALL',
+  'TERM',
+  'USER',
+  'USERNAME',
+  'LOGNAME',
+  'SHELL',
+  'COMSPEC',
+  'PATHEXT',
+]);
+
+function buildClaudeEnv() {
+  const out = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    const upper = k.toUpperCase();
+    // Allowlist match.
+    if (CLAUDE_ENV_ALLOWLIST.has(upper)) {
+      out[k] = v;
+      continue;
+    }
+    // Claude/Anthropic-owned variables — needed for auth + MCP config.
+    if (upper.startsWith('CLAUDE_') || upper.startsWith('ANTHROPIC_')) {
+      out[k] = v;
+      continue;
+    }
+    // Node-required runtime bits (NODE_PATH etc.) — keep narrow.
+    if (upper === 'NODE_PATH' || upper === 'NODE_OPTIONS' || upper === 'NVM_DIR' || upper === 'NVM_BIN') {
+      out[k] = v;
+    }
+  }
+  if (!out.HOME) out.HOME = os.homedir();
+  return out;
+}
+
+// ── Cross-platform child-process kill ──────────────────────────
+// Node on Windows does not actually deliver POSIX signals; `kill('SIGTERM')`
+// instantly terminates and the SIGKILL escalation is meaningless. On POSIX
+// the staged SIGTERM → SIGKILL is the right behaviour. Pick per platform
+// and track the escalation timer so it can be cleared on early exit.
+
+function killChildProcess(proc) {
+  if (!proc || proc.killed) return null;
+  if (process.platform === 'win32') {
+    try {
+      // taskkill /T kills the entire process tree (claude can spawn MCPs).
+      spawnSync('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { timeout: 5000 });
+    } catch {
+      try { proc.kill(); } catch { /* already dead */ }
+    }
+    return null;
+  }
+  try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+  const escalation = setTimeout(() => {
+    try { proc.kill('SIGKILL'); } catch { /* already dead */ }
+  }, 3000);
+  // Cancel the escalation timer if the child actually exits in time.
+  proc.once('exit', () => clearTimeout(escalation));
+  return escalation;
+}
+
 // ── Claude CLI Spawner ────────────────────────────────────────
 
 async function runClaude(prompt, sessionId, request, onEvent) {
@@ -1498,10 +1580,7 @@ async function runClaude(prompt, sessionId, request, onEvent) {
     activeRequests--;
     if (proc) {
       spawnedProcs.delete(proc);
-      if (!proc.killed) {
-        proc.kill('SIGTERM');
-        setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* already dead */ } }, 3000);
-      }
+      killChildProcess(proc);
     }
   };
 
@@ -1534,10 +1613,7 @@ async function runClaude(prompt, sessionId, request, onEvent) {
 
     proc = spawn(claudeBin, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        HOME: os.homedir(),
-      },
+      env: buildClaudeEnv(),
     });
     spawnedProcs.add(proc);
 
@@ -1922,7 +1998,7 @@ Hard constraints:
   return new Promise((resolve, reject) => {
     const proc = spawn(claudeBin, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, HOME: os.homedir() },
+      env: buildClaudeEnv(),
     });
     spawnedProcs.add(proc);
 
@@ -1978,7 +2054,7 @@ Hard constraints:
 
     proc.stdin.write(prompt, (err) => {
       if (err) {
-        try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+        killChildProcess(proc);
         spawnedProcs.delete(proc);
         reject(new Error(`Failed to write Jira completion prompt: ${err.message}`));
         return;
@@ -1987,7 +2063,7 @@ Hard constraints:
     });
 
     const timer = setTimeout(() => {
-      try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+      killChildProcess(proc);
       spawnedProcs.delete(proc);
       reject(new Error(`Jira completion pass timed out after ${JIRA_COMPLETION_TIMEOUT_MS / 1000}s`));
     }, JIRA_COMPLETION_TIMEOUT_MS);
@@ -2521,11 +2597,10 @@ server.listen(PORT, '127.0.0.1', () => {
 function gracefulShutdown(signal) {
   console.log(`\n  Bridge shutting down (${signal})...`);
 
-  // Kill all tracked Claude CLI child processes to prevent orphans
+  // Kill all tracked Claude CLI child processes (and their MCP subtrees) to
+  // prevent orphans. Uses the platform-aware kill helper.
   for (const proc of spawnedProcs) {
-    if (!proc.killed) {
-      try { proc.kill('SIGTERM'); } catch { /* ignore */ }
-    }
+    killChildProcess(proc);
   }
   spawnedProcs.clear();
 
@@ -2542,9 +2617,14 @@ function gracefulShutdown(signal) {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
-// Handle uncaught errors — don't crash the bridge
+// A fatal error puts the bridge in an undefined state — orphaned children,
+// half-flushed SSE streams, and an unknown view of the session map. Log
+// loudly, attempt graceful shutdown, and exit non-zero so a supervisor can
+// restart cleanly instead of letting the process limp on with corrupt state.
 process.on('uncaughtException', (err) => {
-  console.error('  [FATAL] Uncaught exception:', err.message);
+  console.error('  [FATAL] Uncaught exception:', err && err.stack ? err.stack : err);
+  try { gracefulShutdown('uncaughtException'); } catch { /* ignore */ }
+  setTimeout(() => process.exit(1), 1000).unref();
 });
 
 process.on('unhandledRejection', (reason) => {
