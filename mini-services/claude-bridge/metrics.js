@@ -20,6 +20,8 @@ const histograms = new Map(); // key → { buckets: Map<upperBoundMs, count>, su
 
 const DEFAULT_BUCKETS_MS = [50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 300000];
 
+/** @typedef {Object<string, string|number|boolean>} MetricLabels */
+
 function labelsKey(labels) {
   if (!labels || typeof labels !== 'object') return '';
   const entries = Object.entries(labels)
@@ -33,16 +35,36 @@ function seriesKey(name, labels) {
   return lk ? `${name}|${lk}` : name;
 }
 
+/**
+ * Increment a labelled counter.
+ * @param {string} name
+ * @param {MetricLabels} [labels]
+ * @param {number} [by]
+ */
 function incr(name, labels, by = 1) {
   const key = seriesKey(name, labels);
   counters.set(key, (counters.get(key) || 0) + by);
 }
 
+/**
+ * Set a labelled gauge to an absolute value.
+ * @param {string} name
+ * @param {MetricLabels} [labels]
+ * @param {number} value
+ */
 function setGauge(name, labels, value) {
   const key = seriesKey(name, labels);
   gauges.set(key, value);
 }
 
+/**
+ * Record one duration observation against a labelled histogram. Buckets are
+ * fixed (50ms → 5min) at module level; matches what most production SLOs
+ * for a long-running orchestrator want to monitor.
+ * @param {string} name
+ * @param {MetricLabels} [labels]
+ * @param {number} valueMs
+ */
 function observe(name, labels, valueMs) {
   const key = seriesKey(name, labels);
   let h = histograms.get(key);
@@ -59,6 +81,11 @@ function observe(name, labels, valueMs) {
   }
 }
 
+/**
+ * Return a serialisable snapshot of all in-process metrics. Used by the
+ * /metrics HTTP endpoint.
+ * @returns {{counters: object, gauges: object, histograms: object}}
+ */
 function snapshot() {
   const out = { counters: {}, gauges: {}, histograms: {} };
   for (const [key, value] of counters) out.counters[key] = value;

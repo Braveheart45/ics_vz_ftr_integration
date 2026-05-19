@@ -190,8 +190,28 @@ function validateOptionalBoolean(value, field) {
 }
 
 /**
- * Validate a POST /chat or /generate body. Returns the normalised payload
- * with the fields the rest of the bridge consumes.
+ * @typedef {Object} ValidationFail
+ * @property {false} ok
+ * @property {string} code        Stable error code, e.g. "BQ_PROJECT_FORMAT"
+ * @property {string} message     Human-readable explanation
+ * @property {string|null} field  Dotted field path that failed (or null for top-level)
+ */
+
+/**
+ * @typedef {Object} ValidationOk
+ * @property {true} ok
+ * @property {Object} value Normalised payload safe for downstream consumption
+ */
+
+/**
+ * Validate and normalise a POST /chat request body. On success returns
+ * `{ok:true, value}` where `value` has the canonical shape the bridge
+ * consumes (trimmed strings, role-checked messages, jiraInput dropped to
+ * undefined when both fields are empty, etc.). On failure returns
+ * `{ok:false, code, message, field}` suitable for a structured 400 response.
+ *
+ * @param {unknown} rawBody
+ * @returns {ValidationOk|ValidationFail}
  */
 function validateChatBody(rawBody) {
   if (!rawBody || typeof rawBody !== 'object') {

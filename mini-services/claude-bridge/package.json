@@ -5,6 +5,11 @@
   "private": true,
   "scripts": {
     "dev": "bun --hot index.js",
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test tests/*.test.js",
+    "test:watch": "node --test --watch tests/*.test.js"
+  },
+  "dependencies": {
+    "pino": "^10.3.1"
   }
 }

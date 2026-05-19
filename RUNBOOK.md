@@ -1,795 +1,402 @@
 # SQL Curator — Operations Runbook
 
-## AI-Powered SQL Generation & Legacy Conversion Agent
-### Claude Code CLI Integration (Local, API-Free Architecture)
+Deployment, configuration, monitoring, and incident response for the SQL Curator bridge + frontend.
+
+For application architecture and HTTP API reference, see [`README.md`](README.md). For Claude's operating contract, see [`skills/sqlforge/SKILL.md`](skills/sqlforge/SKILL.md).
 
 ---
 
-## 1. Architecture Overview
+## 1. Architecture
 
-### 1.1 High-Level Design
+### 1.1 Process topology
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                       SQL Curator Frontend                          │
-│            (Next.js 16 — React 19 + TypeScript + Tailwind)          │
-│                                                                     │
-│  ┌──────────────────────┐  ┌──────────────────────────────────────┐ │
-│  │    LEFT PANEL        │  │         RIGHT PANEL                  │ │
-│  │  ┌────────────────┐  │  │  ┌────────────────────────────────┐  │ │
-│  │  │  SQL Editor     │  │  │  │  Task Type Selector            │  │ │
-│  │  │  (flex grow)   │  │  │  ├────────────────────────────────┤  │ │
-│  │  ├────────────────┤  │  │  │  Jira Project + Story Number   │  │ │
-│  │  │  STM Viewer    │  │  │  │  BigQuery Project (mandatory)  │  │ │
-│  │  │  (collapsible) │  │  │  │  File Upload + Context Input   │  │ │
-│  │  └────────────────┘  │  │  ├────────────────────────────────┤  │ │
-│  └──────────────────────┘  │  │  "Submit & Generate" Button    │  │ │
-│                             │  ├────────────────────────────────┤  │ │
-│                             │  │  Activity Feed                 │  │ │
-│                             │  │  • Pipeline Tracker (compact)  │  │ │
-│                             │  │  • Findings / Decisions /      │  │ │
-│                             │  │    Inferences / Validations    │  │ │
-│                             │  │  • Per-stage grouped cards     │  │ │
-│                             │  ├────────────────────────────────┤  │ │
-│                             │  │  SQL Curator Assistant         │  │ │
-│                             │  │  (Clarification Q&A)           │  │ │
-│                             │  │  • Persistent Q&A history      │  │ │
-│                             │  │  • Option chips + free text    │  │ │
-│                             │  └────────────────────────────────┘  │ │
-│                             └──────────────────────────────────────┘ │
-└───────────────────────────┬─────────────────────────────────────────┘
-                            │ POST /api/chat  (SSE stream)
-                            ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                    Next.js API Routes                               │
-│                                                                     │
-│  ┌─────────────────────────────────────────────────────────────┐   │
-│  │  /api/chat (route.ts)                                       │   │
-│  │  ┌─────────────────────┐   ┌─────────────────────────────┐ │   │
-│  │  │  USE_CLAUDE_BRIDGE   │   │  Built-in Agent             │ │   │
-│  │  │  = true              │   │  (z-ai-web-dev-sdk)         │ │   │
-│  │  │  ↓                   │   │  Fallback when bridge off   │ │   │
-│  │  │  → claude-bridge.js  │   │                             │ │   │
-│  │  └─────────────────────┘   └─────────────────────────────┘ │   │
-│  └─────────────────────────────────────────────────────────────┘   │
-│  ┌─────────────────────┐   ┌─────────────────────────────────────┐ │
-│  │  /api/generate      │   │  /api/sql/validate  /api/sql/analyze│ │
-│  │  (Regenerate)       │   │                                     │ │
-│  └─────────────────────┘   └─────────────────────────────────────┘ │
-└───────────────────────────┬─────────────────────────────────────────┘
-                            │ (when bridge mode)
-                            │ POST /chat?XTransformPort=3001
-                            ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                  claude-bridge (Mini-Service)                       │
-│                  Port 3001 — Node.js HTTP Server                    │
-│                                                                     │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │  Session Manager                                             │   │
-│  │  • Per-session conversation context                           │   │
-│  │  • Conversation ID resumption (--resume flag)                 │   │
-│  │  • 30-min idle TTL, auto-cleanup                              │   │
-│  └──────────────────────────────────────────────────────────────┘   │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │  JSON-Lines Parser                                           │   │
-│  │  • tool_use → SSE tool_call + status                         │   │
-│  │  • tool_result → SSE tool_result                             │   │
-│  │  • content_block_delta → accumulate text                      │   │
-│  │  • result → capture conversation_id                           │   │
-│  │  • clarification detection → SSE clarification event          │   │
-│  └──────────────────────────────────────────────────────────────┘   │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │  Concurrency Limiter                                         │   │
-│  │  • Max 3 concurrent Claude CLI processes                     │   │
-│  │  • 3-minute timeout per request                              │   │
-│  │  • Auto SIGTERM → SIGKILL on timeout                         │   │
-│  └──────────────────────────────────────────────────────────────┘   │
-└───────────────────────────┬─────────────────────────────────────────┘
-                            │ spawn claude -p - --output-format stream-json
-                            ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                  Claude Code CLI (Local)                             │
-│                                                                     │
-│  Config: ~/.claude.json                                             │
-│                                                                     │
-│  ┌────────────────┐  ┌────────────────┐  ┌────────────────────┐    │
-│  │  Jira MCP      │  │  BigQuery MCP  │  │  GitHub MCP        │    │
-│  │  Server        │  │  Server        │  │  Server            │    │
-│  │                │  │                │  │                    │    │
-│  │  • Fetch       │  │  • List        │  │  • Create PR       │    │
-│  │    stories     │  │    datasets    │  │  • Push files      │    │
-│  │  • Read        │  │  • Get table   │  │                    │    │
-│  │    comments    │  │    schemas     │  │                    │    │
-│  └────────────────┘  └────────────────┘  └────────────────────┘    │
-└─────────────────────────────────────────────────────────────────────┘
+Browser ── HTTPS ──▶ Next.js (port 3000) ──▶ claude-bridge (port 3001)
+                                                     │
+                                                     │ spawn (one per request)
+                                                     ▼
+                                              Claude CLI (-p, stream-json)
+                                                     │
+                                                     ▼
+                                         MCP servers: Jira • BigQuery • GitHub
 ```
 
-### 1.2 Key Architecture Decisions
+Two processes to supervise: the Next.js server and `claude-bridge`. The bridge is a stateless HTTP/SSE proxy with in-memory session state and an in-memory metrics snapshot — no database.
 
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| **AI Backend** | Claude Code CLI (local) | No API keys needed. MCP connectors give native access to Jira, BigQuery, GitHub |
-| **Communication** | HTTP + SSE streaming | Real-time progress updates to UI. SSE is simpler than WebSocket for this use case |
-| **Bridge Pattern** | Separate Node.js mini-service | Isolation from Next.js process. Independent scaling, crash recovery |
-| **Conversation Context** | In-memory session store + `--resume` flag | Claude maintains context across multi-turn interactions |
-| **Activity Feed** | Inline `activity` JSON blocks in Claude output | Live per-stage findings streamed as cards; no plumbing language visible |
-| **Two-pass Jira** | Main run blocks Jira writes via `--disallowedTools`; follow-up pass runs after gate | Guarantees comment + transition happen only after dry-run passes |
-| **Strict validation gate** | `sqlChecks.status` must be `pass` or SQL is withheld | Prevents unvalidated SQL from reaching the editor |
-| **Clarification history** | Persistent store of all Q&A per session | Architect can review every question, option selection, and context across rounds |
-| **Stage regression guard** | Zustand `setStage` refuses to move pipeline backwards | Stray tool-pair status events cannot re-activate completed stages |
-| **Semantic tool translation** | Bridge maps tool_use + tool_result pairs to architect-readable findings | No MCP plumbing language reaches the Activity Feed |
-| **Fallback** | Built-in agent (z-ai-web-dev-sdk) | Works without Claude CLI for basic testing. Requires real credentials for Jira/BQ/GitHub APIs |
+### 1.2 Bridge module layout
 
-### 1.3 Confirmation: API-Free Architecture
+```
+mini-services/claude-bridge/
+  index.js                    HTTP server + claude-session orchestration
+  config.js                   Env loader (fail-fast, range-checked)
+  logging.js                  pino-backed leveled logger
+  metrics.js                  Counters / gauges / histograms
+  request-validation.js       Schema-driven request validator
+  activity.js                 Activity Feed event normalisers
+  tool-helpers.js             MCP tool_result canonicaliser
+  output-parsers.js           SQL / STM / clarification extractors
+  structural-checks.js        L2 SQL ↔ STM checks (LLM-free)
+  tests/                      node --test suite (87 unit tests)
+  .env.example                Annotated env-var reference
+```
 
-**The backend is designed to connect the frontend UI directly to the local Claude Code CLI. It does NOT rely on external APIs.**
+### 1.3 Validation gate
 
-- **No Anthropic API key required** — Claude Code CLI authenticates directly via Claude Pro/Max subscription
-- **No external API calls** — All Jira/BigQuery/GitHub interactions happen through Claude's native MCP connectors
-- **No cloud dependency** — Everything runs locally on the developer's machine
-- **MCP configuration** — Tools are configured in `~/.claude.json`, not in the application
+Every SQL run passes through three bridge-owned layers. All three must pass for SQL to surface.
+
+| Layer | What it checks | Verdict source | LLM in verdict? |
+|---|---|---|---|
+| **L1 Executional** | Does the SQL parse and resolve in BigQuery? | Raw `tool_result.is_error` from the dry-run MCP call | No |
+| **L2 Structural** | Does the SQL implement what the STM declared? | Mechanical SQL ↔ STM comparison | No |
+| **L3 Semantic** | Does the STM cover every acceptance criterion? | Fresh Claude session given only requirements + STM (no SQL, no history) | Yes — cold, narrowly scoped |
+
+Claude's prose `validation.sqlChecks.status` is **discarded** and overwritten by the bridge-derived verdict before the UI sees it.
 
 ---
 
 ## 2. Prerequisites
 
-### 2.1 Claude Code CLI
+| Requirement | Details |
+|---|---|
+| Node.js | 18+ (tested on 26) |
+| Claude Code CLI | `npm install -g @anthropic-ai/claude-code` then `claude login` |
+| MCP servers | Atlassian Rovo (Jira), Google Cloud BigQuery, GitHub — configured in `~/.claude.json` |
 
+The BigQuery MCP needs read access plus the right to call `jobs.create` in dry-run mode on the target project. The Jira MCP needs comment-add and issue-transition rights — the bridge blocks Jira write tools during the main pass via `--disallowedTools` and only re-enables them in the follow-up pass.
+
+Verify the toolchain before deploying:
 ```bash
-# Install Claude Code CLI globally
-npm install -g @anthropic-ai/claude-code
-
-# Verify installation
 claude --version
-
-# Authenticate (one-time)
-claude auth login
-```
-
-**Reference:** https://docs.anthropic.com/en/docs/claude-code/overview
-
-### 2.2 MCP Server Configuration
-
-Create or update `~/.claude.json` with MCP server definitions:
-
-```json
-{
-  "mcpServers": {
-    "jira": {
-      "command": "npx",
-      "args": ["-y", "@anthropic-ai/mcp-jira"],
-      "env": {
-        "JIRA_API_TOKEN": "your-jira-api-token",
-        "JIRA_BASE_URL": "https://your-domain.atlassian.net"
-      }
-    },
-    "bigquery": {
-      "command": "npx",
-      "args": ["-y", "@anthropic-ai/mcp-bigquery"],
-      "env": {
-        "GOOGLE_CLOUD_PROJECT": "your-gcp-project-id",
-        "GOOGLE_APPLICATION_CREDENTIALS": "/path/to/service-account.json"
-      }
-    },
-    "github": {
-      "command": "npx",
-      "args": ["-y", "@anthropic-ai/mcp-github"],
-      "env": {
-        "GITHUB_TOKEN": "ghp_your-github-token"
-      }
-    }
-  }
-}
-```
-
-**Reference:** https://modelcontextprotocol.io/docs/develop/connect-local-servers
-
-### 2.3 Verify MCP Connectivity
-
-```bash
-# Test Claude CLI with MCP tools
-claude -p "List my Jira projects" --verbose
-
-# Test BigQuery
-claude -p "List datasets in my BigQuery project" --verbose
-
-# Verify streaming JSON output format
-claude -p "Say hello" --output-format stream-json
+claude -p "list datasets" --verbose            # should call BQ MCP
+cat ~/.claude.json | jq .mcpServers | keys
 ```
 
 ---
 
-## 3. Installation & Startup
-
-### 3.1 Environment Setup
+## 3. Installation
 
 ```bash
-# Clone the repository
-cd sql-curator
-
-# Install dependencies
+# Frontend
+cd <repo-root>
 bun install
+npm run build                                  # production build
 
-# Copy environment template
-cp .env.example .env.local
-
-# Edit .env.local — set USE_CLAUDE_BRIDGE=true
-# (This is already the default in .env.example)
-```
-
-### 3.2 Start All Services
-
-You need to start **two** services:
-
-```bash
-# Terminal 1: Start the Claude Bridge (port 3001)
+# Bridge
 cd mini-services/claude-bridge
-bun run dev
-
-# Terminal 2: Start the Next.js application (port 3000)
-cd /path/to/sql-curator
-bun run dev
-```
-
-### 3.3 Startup Verification
-
-```bash
-# Check bridge health
-curl http://127.0.0.1:3001/health
-
-# Expected response:
-# {
-#   "status": "ready",
-#   "claude": "claude",
-#   "activeRequests": 0,
-#   "maxConcurrent": 3,
-#   "activeSessions": 0,
-#   "port": 3001,
-#   "uptime": 12,
-#   "mode": "claude_cli"
-# }
-
-# Check Next.js dev server
-curl http://localhost:3000
-```
-
-### 3.4 Running Without Claude CLI (Direct Mode)
-
-If Claude Code CLI is not installed, the application falls back to a built-in agent that uses the `z-ai-web-dev-sdk` with direct API clients. To force this:
-
-```bash
-# In .env.local:
-USE_CLAUDE_BRIDGE=false
-```
-
-> **Note:** Direct mode requires real API credentials configured in environment variables (JIRA_BASE_URL, JIRA_USER_EMAIL, JIRA_API_TOKEN, GCP_PROJECT_ID, GCP_ACCESS_TOKEN). Without Claude CLI, there is no MCP-based tool access. Configure credentials in `.env.local`.
-
----
-
-## 4. Bidirectional Interaction
-
-### 4.1 How It Works
-
-SQL Curator supports **fully bidirectional interaction** between the user and Claude Code:
-
-```
-User Input ──────────→ Claude Code ──────────→ SQL Output
-                         │   ↑
-                         │   │
-              (Asks clarifying question)
-                         │   │
-              (User responds via chat)  ←───┘
-                         │
-              (Generates refined SQL)
-```
-
-### 4.2 Interaction Flow
-
-1. **Initial Request:** User fills in Jira/BQ/Context fields and clicks "Submit & Generate"
-2. **Claude Processes:** Claude CLI uses MCP tools to fetch Jira story, explore BQ schemas
-3. **Two possible outcomes:**
-   - **SQL Generated:** Claude produces SQL → displayed in editor → pipeline reaches "Ready"
-   - **Clarification Needed:** Claude asks a follow-up question → orange "needs information" banner appears
-
-4. **User Responds:** Type in the chat panel input bar → press Enter or click Send
-5. **Context Preserved:** Full conversation history is sent with each request. Claude sees all previous messages.
-6. **Iterate:** Process continues until Claude generates SQL or the user is satisfied
-
-### 4.3 Clarification State
-
-When Claude needs more information, the UI shows:
-
-- **Orange banner** in the chat panel: "Claude needs more information"
-- **Dynamic placeholder** in input bar: "Respond to Claude's question..."
-- **Agent state** changes to `awaiting_clarification`
-- User's response clears the clarification state and resumes processing
-
-### 4.4 Structured Response Methods
-
-Users can respond to Claude in three ways:
-
-| Method | How | When |
-|--------|-----|------|
-| **Form fields** | Jira project, story number, BQ project, file upload, context text | Initial request |
-| **Chat follow-up** | Text input at bottom of chat panel | During/after processing |
-| **Regenerate** | Click refresh button in SQL editor toolbar | After SQL is generated |
-
-### 4.5 Conversation Resumption
-
-The bridge maintains per-session state:
-- **Session ID:** UUID generated on page load, shared across all requests
-- **Message History:** Last 20 messages stored in memory
-- **Claude Conversation ID:** Captured from Claude CLI `--resume` for native context continuation
-- **Session Cleanup:** Sessions expire after 30 minutes of inactivity
-
----
-
-## 5. Data Flow & SSE Events
-
-### 5.1 Event Types
-
-The bridge emits the following SSE events:
-
-| Event | Data | UI Effect |
-|-------|------|-----------|
-| `status` | `{ stage, message }` | Pipeline tracker advances (regression-guarded — never moves backwards) |
-| `activity_event` | `{ stage, type, status, title, summary, details[], confidence, evidence[], source }` | New card added to Activity Feed live during run |
-| `message` | `{ content }` | Full assistant message displayed in SQL Curator Assistant pane |
-| `sql` | `{ sql, fileName }` | SQL editor populated; only emitted when `sqlChecks.status === 'pass'` |
-| `stm` | `{ stmArtifact }` | STM artifact stored; table viewer and download buttons activate |
-| `validation` | `{ validationSummary }` | 5 structured section cards appended to Activity Feed |
-| `clarification` | `{ message, options[], allowFreeText, explanation, details }` | Clarification card shown in SQL Curator Assistant; history entry created |
-| `error` | `{ message }` | Error card shown in Assistant pane; pipeline stage marked failed at current stage |
-| `done` | `{ success }` | Streaming stops, agent state finalized |
-
-### 5.2 Pipeline Stages
-
-```
-idle → intake → analysis → schema_resolution → sql_generation → validation → ready
-  │       │         │              │                  │              │         │
-  │  User    Claude     Fetch Jira    List BQ         Generate     Dry-run    SQL
-  │  submits  connects   story        datasets        SQL          SQL       ready
-  │
-  └─ Or: awaiting_clarification (Claude asked a question)
-```
-
-### 5.3 Request/Response Example
-
-**Request (POST /api/chat):**
-```json
-{
-  "sessionId": "a1b2c3d4-...",
-  "taskType": "sql_generation",
-  "jiraInput": { "project": "PROJ", "storyNumber": "1234" },
-  "bqProjectId": "my-analytics-prod",
-  "contextText": "Include date partitioning",
-  "messages": [
-    { "role": "user", "content": "[Jira] Project: PROJ, Story: 1234\n\n[BigQuery] Project: my-analytics-prod\n\nInclude date partitioning" }
-  ]
-}
-```
-
-**SSE Stream Response:**
-```
-event: status
-data: {"stage":"intake","message":"Connecting to Claude Code...","timestamp":...}
-
-event: status
-data: {"stage":"analysis","message":"Claude is analyzing your request...","timestamp":...}
-
-event: tool_call
-data: {"tool":"jira_get_issue","args":{"issueKey":"PROJ-1234"},"timestamp":...}
-
-event: tool_result
-data: {"tool":"jira_get_issue","success":true,"summary":"Fetched: PROJ-1234 — Build daily revenue report","timestamp":...}
-
-event: tool_call
-data: {"tool":"bigquery_list_datasets","args":{"projectId":"my-analytics-prod"},"timestamp":...}
-
-event: tool_result
-data: {"tool":"bigquery_list_datasets","success":true,"summary":"Found 5 datasets: raw_data, staging, analytics, reporting, ml_features","timestamp":...}
-
-event: status
-data: {"stage":"sql_generation","message":"Generating SQL...","timestamp":...}
-
-event: message
-data: {"content":"## Analysis\nBased on Jira story PROJ-1234, I've designed...\n\n```sql\nSELECT ...","timestamp":...}
-
-event: sql
-data: {"sql":"SELECT date, SUM(revenue) ...","fileName":"generated_sql_1234.sql","timestamp":...}
-
-event: done
-data: {"success":true,"timestamp":...}
+cp .env.example .env                           # edit if needed
+npm install                                    # installs pino
 ```
 
 ---
 
-## 6. Configuration Reference
+## 4. Configuration
 
-### 6.1 Environment Variables
+Every variable is read once at startup, validated, and frozen. Malformed values throw an aggregated error report — the bridge will not boot in a half-configured state.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `USE_CLAUDE_BRIDGE` | `true` | Route requests through claude-bridge.js |
-| `BRIDGE_PORT` | `3001` | Port for the claude-bridge mini-service |
-| `CLAUDE_MAX_CONCURRENT` | `3` | Max concurrent Claude CLI processes |
-| `CLAUDE_MAX_TURNS` | `25` | Max agent turns per request |
-| `CLAUDE_TIMEOUT_MS` | `180000` | Request timeout (3 minutes) |
-| `MAX_HISTORY_MESSAGES` | `20` | Max messages per session history |
-| `SQL_CURATOR_REQUIRE_DRYRUN_PASS` | `true` | If `true`, SQL is withheld from the UI unless `sqlChecks.status === 'pass'` |
-| `SQL_CURATOR_DEFER_JIRA_COMPLETION` | `true` | If `true`, Jira comment + transition run in a separate follow-up Claude pass after the gate clears |
-| `SQL_CURATOR_JIRA_COMPLETION_TIMEOUT_MS` | `120000` | Timeout for the Jira follow-up pass (2 minutes) |
+The complete annotated reference lives in [`mini-services/claude-bridge/.env.example`](mini-services/claude-bridge/.env.example). The most-touched variables:
 
-### 6.2 MCP Server Configuration
+| Variable | Default | Range / values | Purpose |
+|---|---|---|---|
+| `BRIDGE_PORT` | `3001` | 1–65535 | HTTP listener port |
+| `CLAUDE_MAX_TURNS` | `25` | 1–200 | Tool-use turns per main session |
+| `CLAUDE_TIMEOUT_MS` | `1200000` | 1000–3600000 | Wall-clock cap per session (20 min) |
+| `CLAUDE_MAX_CONCURRENT` | `3` | 1–32 | Concurrent in-flight bridge requests |
+| `MAX_HISTORY_MESSAGES` | `20` | 1–500 | Recent client messages forwarded to Claude |
+| `SQL_CURATOR_MAX_REQUEST_BODY_BYTES` | `2097152` | 1024–67108864 | Max accepted request body (2 MB) |
+| `SQL_CURATOR_MAX_STREAM_BUFFER_BYTES` | `8388608` | 65536–268435456 | Bounded buffer on stream accumulators (8 MB) |
+| `SQL_CURATOR_REQUIRE_DRYRUN_PASS` | `true` | boolean | Strict gate; SQL withheld unless all layers pass |
+| `SQL_CURATOR_L3_COVERAGE_CHECK` | `true` | boolean | Enable the L3 cold semantic-coverage session |
+| `SQL_CURATOR_L3_TIMEOUT_MS` | `45000` | 5000–600000 | Cold-session timeout |
+| `SQL_CURATOR_DEFER_JIRA_COMPLETION` | `true` | boolean | Two-pass Jira ordering |
+| `SQL_CURATOR_JIRA_COMPLETION_TIMEOUT_MS` | `120000` | 5000–1800000 | Jira follow-up pass timeout |
+| `SQL_CURATOR_JIRA_WRITE_TOOLS` | (built-in list) | comma list | Override the Jira write tools blocked during main pass |
+| `SQL_CURATOR_ENABLE_OFFLINE_DRY_RUN` | `false` | boolean | Deterministic stub for UI testing without Claude |
+| `SQL_CURATOR_LOG_LEVEL` | `info` | trace/debug/info/warn/error/fatal | pino log threshold |
+| `SQL_CURATOR_LOG_PRETTY` | `false` | boolean | Use `pino-pretty` single-line output for dev (requires `pino-pretty` package) |
 
-MCP servers are configured in `~/.claude.json` (NOT in the application). This is by design — Claude Code CLI manages its own tool configuration.
+### MCP servers
 
-| MCP Server | Required Tools | Environment Variables |
-|------------|---------------|----------------------|
-| **Jira** | `jira_get_issue`, `jira_search`, `jira_add_comment` | `JIRA_API_TOKEN`, `JIRA_BASE_URL` |
-| **BigQuery** | `bigquery_list_datasets`, `bigquery_get_table_schema`, `bigquery_query` | `GOOGLE_CLOUD_PROJECT`, `GOOGLE_APPLICATION_CREDENTIALS` |
-| **GitHub** | `github_create_pr`, `github_push_file` | `GITHUB_TOKEN` |
+MCP servers are configured in `~/.claude.json`, not in this repo. Claude CLI owns its own tool configuration.
 
----
-
-## 7. Production Architecture Details
-
-### 7.1 Activity Feed — Live Streaming Protocol
-
-The Activity Feed (right panel, top section) shows architect-readable findings, decisions, inferences, and validations as they happen — not all at once at the end.
-
-**How it works:**
-
-1. Claude emits fenced ` ```activity ` JSON blocks inline during its response stream.
-2. The bridge's `processInlineActivities()` scans each new text delta as it arrives and immediately forwards completed blocks as `activity_event` SSE events.
-3. The frontend appends each card to the feed without waiting for the run to finish.
-4. At run end, only the 5 structured validation section cards (Requirement Coverage, STM Completeness, Schema Reconciliation, SQL Checks, Jira Transition) are appended from the `validation` event.
-
-**What appears in the feed:**
-- Findings from each stage (intake, analysis, schema_resolution, sql_generation, validation, ready)
-- Inferences with confidence % and evidence
-- Decisions with rationale
-- Dry-run results and auto-fixes
-- No MCP plumbing language ("Calling BigQuery MCP" is never shown)
-
-### 7.2 Two-Pass Jira Workflow
-
-For Jira-backed runs, the Jira comment and status transition are strictly the last actions — enforced at the tool level:
-
-**Main pass (Claude's generation run):**
-- Jira write tools (`addCommentToJiraIssue`, `transitionJiraIssue`, etc.) are blocked via `--disallowedTools`
-- Jira read tools remain available throughout
-- `validation.jiraTransition.status` is set to `not_run`
-
-**Follow-up pass (bridge-spawned after gate clears):**
-- Triggered automatically by the bridge after `sqlChecks.status === 'pass'`
-- A second Claude session resumes the same conversation with Jira writes enabled
-- Posts comment + transitions to In Progress
-- Result appears as a `Jira Transition` card in the Activity Feed
-
-If the follow-up pass fails or is skipped, a `Jira Update Skipped` error card is added to the feed.
-
-### 7.3 Strict Validation Gate
-
-The bridge enforces: **SQL is only delivered to the UI if `validation.sqlChecks.status === 'pass'`**.
-
-- Set `SQL_CURATOR_REQUIRE_DRYRUN_PASS=false` to disable (dev/testing only)
-- If the gate blocks, the run is reported as failed and the Activity Feed shows the dry-run error cards
-- Claude is instructed to diagnose and retry dry-run failures up to 3 times before failing
-
-### 7.4 Stage Regression Guard
-
-The Zustand `setStage` action refuses to move the pipeline tracker backwards. Stray tool-pair events that would re-activate an already-completed stage are dropped silently. This prevents the "Intake running" issue where late-arriving tool calls mapped to intake would reset the visible stage after the pipeline had already advanced to validation.
+| MCP | Required tools | Permissions |
+|---|---|---|
+| Jira | `getJiraIssue`, `searchJiraIssuesUsingJql`, `addCommentToJiraIssue`, `transitionJiraIssue` | Read + comment + transition on target project |
+| BigQuery | `list_dataset_ids`, `list_table_ids`, `get_table_info`, `execute_sql_readonly` | `jobs.create` in dry-run mode on target project |
+| GitHub | PR / push tools | Only used in `github_deploy` mode |
 
 ---
 
-## 9. Troubleshooting
+## 5. Running in production
 
-### 7.1 Claude CLI Not Found
+### 5.1 systemd
 
-**Symptom:** Bridge returns `503` with "Claude CLI not found"
-
-**Solution:**
-```bash
-# Verify installation
-which claude
-claude --version
-
-# If not found, install
-npm install -g @anthropic-ai/claude-code
-
-# Ensure it's on PATH
-echo $PATH  # Should include npm global bin directory
-```
-
-### 7.2 MCP Tools Not Working
-
-**Symptom:** Claude runs but tool calls fail or return empty results
-
-**Solution:**
-```bash
-# Verify ~/.claude.json exists and is valid JSON
-cat ~/.claude.json | python3 -m json.tool
-
-# Test individual MCP server
-claude -p "Use your Jira tool to fetch story PROJ-1234" --verbose
-
-# Check MCP server logs in Claude's verbose output
-# Look for lines starting with [mcp]
-```
-
-### 7.3 Bridge Not Responding
-
-**Symptom:** UI shows "Claude Bridge is not running"
-
-**Solution:**
-```bash
-# Check if bridge is running
-curl http://127.0.0.1:3001/health
-
-# If not running, start it
-cd mini-services/claude-bridge
-bun run dev
-
-# Check for port conflicts
-lsof -i :3001
-```
-
-### 7.4 Timeout Errors
-
-**Symptom:** "Claude CLI timed out after 180s"
-
-**Solution:**
-```bash
-# Increase timeout in .env.local
-CLAUDE_TIMEOUT_MS=300000  # 5 minutes
-
-# Or reduce complexity of the request
-# (e.g., don't fetch too many table schemas at once)
-```
-
-### 7.5 Concurrency Limit
-
-**Symptom:** "Server busy. 3 concurrent requests max"
-
-**Solution:**
-```bash
-# Increase concurrency limit
-CLAUDE_MAX_CONCURRENT=5
-
-# Or wait for existing requests to complete
-# Check active requests:
-curl http://127.0.0.1:3001/health | jq .activeRequests
-```
-
-### 7.6 Claude Not Generating SQL
-
-**Symptom:** Claude responds with questions instead of SQL
-
-**Possible Causes:**
-1. Requirements are genuinely unclear → This is expected behavior. Respond via chat.
-2. Jira story fetch failed → Check MCP Jira configuration
-3. BQ schema fetch failed → Check BigQuery credentials
-4. Max turns reached before SQL generation → Increase `CLAUDE_MAX_TURNS`
-
-### 7.7 Session Issues
-
-```bash
-# Clear a specific session via API
-curl -X DELETE http://127.0.0.1:3001/session/YOUR_SESSION_ID
-
-# Sessions auto-expire after 30 minutes of inactivity
-# Use "New Session" button in the UI header to reset
-```
-
----
-
-## 10. Service Management
-
-### 8.1 Running as Systemd Services (Linux)
-
-**claude-bridge.service:**
 ```ini
+# /etc/systemd/system/sql-curator-bridge.service
 [Unit]
 Description=SQL Curator Claude Bridge
 After=network.target
 
 [Service]
 Type=simple
-User=your-user
-WorkingDirectory=/path/to/sql-curator/mini-services/claude-bridge
+User=sql-curator
+WorkingDirectory=/opt/sql-curator/mini-services/claude-bridge
+EnvironmentFile=/opt/sql-curator/mini-services/claude-bridge/.env
 ExecStart=/usr/bin/node index.js
-Environment=BRIDGE_PORT=3001
-Environment=CLAUDE_MAX_CONCURRENT=3
-Environment=CLAUDE_TIMEOUT_MS=180000
-Restart=always
+Restart=on-failure
 RestartSec=5
+# Ensure the runtime user can read ~/.claude.json
+Environment=HOME=/home/sql-curator
 
 [Install]
 WantedBy=multi-user.target
 ```
 
 ```bash
-sudo systemctl enable claude-bridge
-sudo systemctl start claude-bridge
-sudo systemctl status claude-bridge
-journalctl -u claude-bridge -f
+sudo systemctl daemon-reload
+sudo systemctl enable --now sql-curator-bridge
+sudo systemctl status sql-curator-bridge
+journalctl -u sql-curator-bridge -f                    # logs are JSON, pipe to jq if needed
 ```
 
-### 8.2 Docker (Optional)
+The bridge exits non-zero on `uncaughtException`. systemd `Restart=on-failure` will bring it back. Active SSE streams are dropped — clients receive `done {success:false}` and can re-submit.
+
+### 5.2 Docker
 
 ```dockerfile
-# Dockerfile.bridge
 FROM node:20-slim
-
-WORKDIR /app
-COPY package.json ./
-COPY index.js ./
-
-# Claude CLI must be available in the container
 RUN npm install -g @anthropic-ai/claude-code
-
+WORKDIR /app
+COPY mini-services/claude-bridge/package.json mini-services/claude-bridge/package-lock.json* ./
+RUN npm ci --omit=dev
+COPY mini-services/claude-bridge/ ./
 EXPOSE 3001
 CMD ["node", "index.js"]
 ```
 
 ```bash
-docker build -f Dockerfile.bridge -t sql-curator-bridge .
-docker run -d -p 3001:3001 \
+docker run -d --name sql-curator-bridge \
+  -p 3001:3001 \
+  --env-file mini-services/claude-bridge/.env \
   -v ~/.claude.json:/root/.claude.json:ro \
-  -e CLAUDE_MAX_CONCURRENT=3 \
-  sql-curator-bridge
+  sql-curator-bridge:latest
 ```
 
----
-
-## 11. Security Considerations
-
-### 9.1 Authentication
-
-- Claude Bridge runs on `127.0.0.1` (localhost only) — not exposed to the network
-- Claude Code CLI authenticates via Claude Pro/Max subscription
-- MCP server credentials are in `~/.claude.json` (user-level, not app-level)
-
-### 9.2 Data Flow
-
-- All data flows locally between processes on the same machine
-- No data is sent to external APIs (beyond Claude's own infrastructure)
-- Jira/BigQuery/GitHub credentials are only accessible to Claude CLI via MCP
-
-### 9.3 Input Sanitization
-
-- User input is passed to Claude CLI as a prompt string
-- Claude CLI handles its own prompt injection protections
-- Bridge does not execute any user-provided code
+The container mounts the host's `~/.claude.json` read-only so MCP server credentials stay outside the image.
 
 ---
 
-## 12. File Reference
+## 6. Health, metrics, and observability
 
-### 10.1 Project Structure
+### 6.1 `GET /health`
 
-```
-sql-curator/
-├── .env.example                          # Environment variable template
-├── claude-bridge.js                      # Legacy root-level bridge (deprecated)
-├── mini-services/
-│   └── claude-bridge/
-│       ├── package.json                  # Mini-service package
-│       └── index.js                      # ★ Claude Code CLI → SSE Bridge
-├── src/
-│   ├── app/
-│   │   ├── page.tsx                      # Main split-screen UI
-│   │   ├── globals.css                   # Theme & animations
-│   │   ├── layout.tsx                    # Root layout
-│   │   └── api/
-│   │       ├── chat/route.ts             # ★ SSE chat endpoint (bridge-aware)
-│   │       ├── generate/route.ts         # ★ SSE generate endpoint (bridge-aware)
-│   │       ├── jobs/route.ts             # Jobs CRUD
-│   │       └── sql/
-│   │           ├── validate/route.ts     # SQL validation
-│   │           └── analyze/route.ts      # SQL analysis
-│   ├── components/split/
-│   │   ├── left-panel.tsx                # SQL Editor + Pipeline Tracker
-│   │   ├── right-panel.tsx               # Task Type + Inputs + Chat
-│   │   ├── chat-panel.tsx                # ★ Bidirectional chat with SSE
-│   │   ├── input-section.tsx             # ★ Submit form with SSE streaming
-│   │   ├── sql-editor.tsx                # SQL output with syntax highlighting
-│   │   ├── pipeline-tracker.tsx          # 7-stage animated pipeline
-│   │   ├── task-type-selector.tsx        # Generate / Convert / Auto-detect
-│   │   ├── jira-input.tsx                # Jira project + story number
-│   │   ├── bq-project-input.tsx          # BigQuery project (mandatory)
-│   │   ├── file-upload.tsx               # Drag & drop file upload
-│   │   └── context-input.tsx             # Free-text context area
-│   ├── lib/
-│   │   ├── types.ts                      # ★ TypeScript types + bidirectional state
-│   │   ├── agent.ts                      # Built-in agent (z-ai-web-dev-sdk fallback)
-│   │   ├── api-clients.ts               # Jira/BQ/GitHub clients (real API only)
-│   │   ├── sse-client.ts                 # Shared SSE types + event dispatcher
-│   │   ├── bridge-forwarder.ts           # Shared Claude Bridge forwarding logic
-│   │   ├── db.ts                         # Prisma client
-│   │   └── utils.ts                      # cn() utility
-│   └── stores/
-│       └── use-app-store.ts              # ★ Zustand store (bidirectional state)
-└── worklog.md                            # Development task history
+Layered status. Returns 200 when Claude CLI is reachable, 503 otherwise.
+
+Status values:
+- `ready` — claude detected, capacity available, no recent errors
+- `claude_not_found` — bridge is up but `which claude` would fail (503)
+- `degraded_capacity` — `activeRequests >= CLAUDE_MAX_CONCURRENT`
+- `recent_errors` — `bridgeState.lastError` within the last 60s
+
+```bash
+curl -s http://127.0.0.1:3001/health | jq
 ```
 
-### 10.2 Key Files Modified for Claude CLI Integration
+Expected fields: `status`, `claude.binPath`, `claude.detected`, `capacity.{activeRequests,maxConcurrent,queueDepth,atCeiling}`, `sessions.active`, `features.*`, `lastError`, `port`, `uptimeSec`.
 
-| File | Purpose |
-|------|---------|
-| `mini-services/claude-bridge/index.js` | HTTP server that spawns `claude` CLI, pipes JSON-Lines to SSE |
-| `src/app/api/chat/route.ts` | Forwards to bridge when `USE_CLAUDE_BRIDGE=true` |
-| `src/app/api/generate/route.ts` | Same bridge support for regeneration |
-| `src/stores/use-app-store.ts` | Added `interactionState`, `pendingClarification` |
-| `src/lib/types.ts` | Added `ClarificationRequest`, `AgentInteractionState` |
-| `src/components/split/chat-panel.tsx` | Handles `clarification` SSE event, shows banner |
-| `src/components/split/input-section.tsx` | Handles `clarification` SSE event |
-| `src/components/split/sql-editor.tsx` | Handles `clarification` SSE event |
+### 6.2 `GET /metrics`
 
----
+JSON snapshot of counters, gauges, and bucketed histograms. Scrape this at ~30s intervals from your monitoring stack.
 
-## 13. Testing Guide
+Key series:
 
-### 11.1 End-to-End Test
+| Series | Type | Labels | Purpose |
+|---|---|---|---|
+| `requests_total` | counter | `endpoint`, `taskType` | Incoming volume |
+| `requests_succeeded` / `requests_failed` / `requests_completed_with_issue` | counter | `endpoint` | Outcome breakdown |
+| `request_duration_ms` | histogram | `endpoint` | End-to-end latency, buckets 50ms → 5min |
+| `gate_layer_result` | counter | `layer` (L1/L2/L3), `status` | Per-layer verdict counts |
+| `claude_sessions_spawned` | counter | `kind` (primary/retry) | Process spawn volume |
+| `claude_sessions_active` | gauge | — | In-flight Claude processes |
+| `claude_sessions_aborted` | counter | `reason` (client_disconnect / pre_aborted) | Disconnect tracking |
+| `auto_retry_attempts` | counter | `reason` (missing_sql) | Auto-retry rate |
+| `idempotency_collision` | counter | `state` (in_flight / completed) | Double-submit attempts |
+| `stream_buffer_overflow` | counter | `accumulator` | Buffer-cap hits |
+| `l3_coverage_outcome` | counter | `result` (timeout / no_block / parse_error) | L3 reliability |
+| `requests_client_disconnect` | counter | `endpoint` | Client-side aborts mid-stream |
 
-1. Start both services (bridge on 3001, Next.js on 3000)
-2. Open the application in the browser
-3. Select a Task Type (e.g., "Generate")
-4. Fill in a Jira story number (e.g., PROJ-1234)
-5. Select a BigQuery project (e.g., my-analytics-prod)
-6. Click "Submit & Generate"
-7. Watch the pipeline tracker progress through stages
-8. Observe tool call indicators (spinning wrenches → green checks)
-9. Review the generated SQL in the editor
-10. Type a follow-up question in the chat input
-11. Verify Claude responds with context from the conversation
+To transform to Prometheus exposition format, add a small adapter — `metrics.snapshot()` returns plain JSON.
 
-### 11.2 Bidirectional Interaction Test
+### 6.3 Logging
 
-1. Submit a vague request (e.g., just a project name without story)
-2. Claude should respond asking for more details
-3. Verify the orange "Claude needs more information" banner appears
-4. Type a response in the chat input
-5. Claude should use the new information to generate SQL
+Structured JSON to stdout (pino). Every per-request log line carries:
+- `requestId` — short hex generated at HTTP entry, echoed in the `X-Request-Id` response header
+- `sessionId` — first 8 chars of the client-supplied session id
+- `component` — `bridge` / `request` / `claude-session` / `l3-coverage`
+- `phase` — additional sub-operation tag (e.g. `l3-coverage`)
 
-### 11.3 Error Handling Test
-
-1. Stop the claude-bridge service
-2. Submit a request
-3. UI should show "Claude Bridge is not running" error
-4. Restart the bridge
-5. Submit again — should work normally
-
----
-
-## 14. Claude CLI Reference
-
-### 12.1 Key Flags Used
-
-| Flag | Purpose |
-|------|---------|
-| `-p -` | Read prompt from stdin (pipe mode) |
-| `--output-format stream-json` | JSON-Lines streaming output format |
-| `--max-turns N` | Limit agent loop iterations |
-| `--resume ID` | Resume a previous conversation |
-| `--verbose` | Include detailed MCP tool logs in stderr |
-
-### 12.2 Output Format
-
-The bridge parses Claude's `stream-json` output, which emits JSON-Lines:
-
-```jsonl
-{"type":"system","subtype":"init",...}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"jira_get_issue","input":{...}}]}}
-{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"...","content":"..."}]}}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Here's the SQL..."}]}}
-{"type":"result","result":"...","conversation_id":"..."}
+Grep one run end-to-end with `requestId=<id>`:
+```bash
+journalctl -u sql-curator-bridge | jq 'select(.requestId == "abc12345")'
 ```
 
-**Reference:** https://docs.anthropic.com/en/docs/claude-code/cli-reference
+In dev, set `SQL_CURATOR_LOG_PRETTY=true` and install `pino-pretty` for single-line colorised output.
 
 ---
 
-*Last updated: $(date -u +%Y-%m-%d)*
-*Version: 1.0.0*
+## 7. Operational safety nets
+
+The bridge is hardened against several common failure modes. The mechanism is listed alongside the defence so operators know what to expect.
+
+| Concern | Mechanism |
+|---|---|
+| Client disconnects mid-stream | `req.on('close')` → `AbortController` → Claude tree killed via `taskkill /T` (Windows) or SIGTERM→SIGKILL escalation (POSIX). Tracked in `claude_sessions_aborted{reason="client_disconnect"}`. |
+| Runaway MCP response | Stream accumulators capped at `SQL_CURATOR_MAX_STREAM_BUFFER_BYTES`. Overflow aborts the session with an explicit Activity Feed error. Tracked in `stream_buffer_overflow`. |
+| Double-submission (refresh / double-click / retry) | `Idempotency-Key` header tracked with a 10-minute TTL. Collisions return 409 with the original `requestId`. |
+| Bridge crash | systemd `Restart=on-failure` brings the process back. `uncaughtException` reaps child processes before exit; `process.on('exit')` is a final-line-of-defence sweep. |
+| Orphaned Claude processes | `spawnedProcs` Set tracked at module level; reaped on SIGTERM/SIGINT/SIGHUP/exit/uncaughtException. On Windows, `taskkill /T` kills the whole MCP server subtree. |
+| Misconfigured environment | `config.js` validates ranges at startup with an aggregated error report. The bridge will not boot in a half-configured state. |
+| Stack trace leaks | All HTTP errors funnel through `sendError(res, status, code, message, extra)` returning `{error: {code, message, ...}}`. No stack traces leave the bridge. |
+| Malformed request payload | Schema-driven validator (`request-validation.js`) with stable error codes and field paths. |
+
+---
+
+## 8. Deployment checklist
+
+After deploying a new version:
+
+1. **Health**
+   ```bash
+   curl -s http://127.0.0.1:3001/health | jq -r .status
+   # expect: ready
+   ```
+
+2. **Metrics endpoint live**
+   ```bash
+   curl -s http://127.0.0.1:3001/metrics | jq .counters
+   ```
+
+3. **Unit tests pass on the host**
+   ```bash
+   cd /opt/sql-curator/mini-services/claude-bridge
+   npm test
+   # expect: tests 87 / pass 87 / fail 0
+   ```
+
+4. **End-to-end smoke** — trigger one minimal SQL run from the UI, watch Activity Feed surface:
+   - L1 card (`BigQuery Dry-Run — pass` from `source: bigquery`)
+   - L2 card (`SQL ↔ STM Structural Check — pass` from `source: bridge`)
+   - L3 card (`Requirements Coverage — pass` from `source: bridge`)
+   - SQL appears in the editor only after all three pass.
+
+5. **Logs are JSON**
+   ```bash
+   journalctl -u sql-curator-bridge --since "5 minutes ago" | head -1 | jq .
+   # should parse cleanly
+   ```
+
+---
+
+## 9. Troubleshooting
+
+### 9.1 Bridge will not start
+Symptom: systemd reports `Active: failed`; logs show `claude-bridge configuration invalid`.
+
+Action: read the error block — it lists every malformed env var. Fix all of them at once (the validator aggregates errors deliberately). `journalctl -u sql-curator-bridge -n 50`.
+
+### 9.2 `/health` returns 503 with `claude_not_found`
+The bridge is up but the Claude CLI is missing from PATH for the systemd user.
+
+```bash
+sudo -u sql-curator bash -lc 'which claude'
+sudo -u sql-curator bash -lc 'claude --version'
+```
+
+If missing, install globally as the runtime user and ensure `npm bin -g` is on its PATH.
+
+### 9.3 SQL never surfaces despite a passing dry-run in the UI
+The Activity Feed will show which layer blocked. Most common causes:
+
+- **L2 fail** — STM declares a target column that's missing from the SQL's outermost SELECT, or a source table the SQL doesn't reference. Fix the STM or the SQL; regenerate.
+- **L3 fail** — STM is missing rows for an acceptance criterion. The cold session lists missing criteria in its activity card. Add the missing rows.
+- **L1 not_run** — Claude did not invoke the dry-run tool. The skill says it must; check `journalctl` for the Claude session output to see why it skipped.
+
+### 9.4 `degraded_capacity` on `/health`
+All concurrency slots taken. Either:
+- Genuine load — raise `CLAUDE_MAX_CONCURRENT` (each slot = 1 Claude process, consider memory)
+- Wedged sessions — check `claude_sessions_active` gauge; if it stays high without traffic, restart the bridge and investigate why cleanup is not running
+
+### 9.5 Client disconnect counter rising
+`metrics.snapshot().counters` shows `requests_client_disconnect` rising. Possible causes:
+- Frontend timeout shorter than Claude session — frontends should not impose timeouts shorter than `CLAUDE_TIMEOUT_MS`
+- Network issues between browser and Next.js — check load balancer settings (some terminate idle SSE streams)
+- Users navigating away mid-run — benign
+
+### 9.6 `stream_buffer_overflow` event
+A Claude session exceeded the 8 MB accumulator cap. Almost always means an MCP tool returned an oversized payload. Check the Activity Feed for the abort card and Claude session logs for the offending tool call. Raise `SQL_CURATOR_MAX_STREAM_BUFFER_BYTES` only if the response is legitimately large.
+
+### 9.7 Jira comment did not post
+Two-pass Jira completion has a verification step: after the follow-up session exits, the bridge checks that `addCommentToJiraIssue` and `transitionJiraIssue` were actually invoked. If not, a `Jira Update Skipped` error card appears in the Activity Feed.
+
+```bash
+journalctl -u sql-curator-bridge | jq 'select(.component == "jira-followup")' | head
+```
+
+Confirm: Jira write tools are not in `--disallowedTools` for the follow-up; the issue is reachable; the user has comment + transition permissions.
+
+### 9.8 Session-related issues
+```bash
+# Clear a specific session
+curl -X DELETE http://127.0.0.1:3001/session/SESSION_ID
+```
+
+Sessions auto-expire after 30 minutes of inactivity. Use the UI's "New Session" button to reset client-side state.
+
+---
+
+## 10. Rollback
+
+The bridge is stateless except for the in-memory sessions and metrics snapshot. A `git revert` plus a bridge restart is sufficient.
+
+```bash
+sudo systemctl stop sql-curator-bridge
+cd /opt/sql-curator
+git revert <bad-sha>
+cd mini-services/claude-bridge && npm install && npm test
+sudo systemctl start sql-curator-bridge
+curl -s http://127.0.0.1:3001/health | jq .status
+```
+
+Active SSE streams are closed during the restart; clients receive `done {success:false}` and re-submit.
+
+---
+
+## 11. Updating the skill
+
+[`skills/sqlforge/SKILL.md`](skills/sqlforge/SKILL.md) is the operating contract Claude reads at the start of every session. Changes take effect on the next request — no bridge restart needed.
+
+For pid-level isolation between old and new contract behaviour during a rollout (e.g. a major SKILL change), restart the bridge after the file is in place.
+
+---
+
+## 12. Security notes
+
+- The bridge binds to `127.0.0.1` by default. Do not expose it directly to the internet.
+- All MCP credentials live in `~/.claude.json` under the systemd user — not in environment variables or repo files.
+- `--dangerously-skip-permissions` is used to auto-approve MCP tool calls (the bridge runs headlessly). The Jira write-tool block via `--disallowedTools` is the explicit guard against premature Jira writes.
+- Request bodies are capped at `SQL_CURATOR_MAX_REQUEST_BODY_BYTES`. Stream accumulators capped at `SQL_CURATOR_MAX_STREAM_BUFFER_BYTES`. No user input is `eval`'d.
+- HTTP errors return structured envelopes (`{error: {code, message, ...}}`) with no stack traces.
+
+---
+
+## 13. Quick reference
+
+| Action | Command |
+|---|---|
+| Start bridge (systemd) | `sudo systemctl start sql-curator-bridge` |
+| Tail JSON logs | `journalctl -u sql-curator-bridge -f \| jq` |
+| Health check | `curl -s http://127.0.0.1:3001/health \| jq` |
+| Metrics scrape | `curl -s http://127.0.0.1:3001/metrics \| jq` |
+| Filter logs by run | `journalctl -u sql-curator-bridge \| jq 'select(.requestId == "abc12345")'` |
+| Clear session | `curl -X DELETE http://127.0.0.1:3001/session/<id>` |
+| Unit tests | `cd mini-services/claude-bridge && npm test` |
+| Type-check frontend | `node node_modules/typescript/bin/tsc --noEmit` |

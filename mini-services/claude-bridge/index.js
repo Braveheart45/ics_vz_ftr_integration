@@ -37,6 +37,34 @@ const { loadConfig } = require('./config');
 const { createLogger, setLevel: setLogLevel, root: rootLogger } = require('./logging');
 const metrics = require('./metrics');
 const { validateChatBody } = require('./request-validation');
+const {
+  ACTIVITY_TYPES,
+  ACTIVITY_STATUSES,
+  ACTIVITY_SOURCES,
+  inferActivityType,
+  inferActivityStage,
+  normalizeActivityStatus,
+  normalizeActivitySource,
+  normalizeActivityType,
+  normalizeStringList,
+  makeActivityEvent,
+} = require('./activity');
+const {
+  safeJsonStringify,
+  safeJsonParse,
+  tryParseJson,
+  pickStrings,
+  clipForActivity,
+  canonicaliseToolResultContent,
+} = require('./tool-helpers');
+const {
+  extractSql,
+  extractStm: extractStmRaw,
+  isClarificationRequest,
+  extractClarification,
+  detectTerminalRunIssue,
+} = require('./output-parsers');
+const { runStructuralChecks } = require('./structural-checks');
 
 // ── Structured error responses ───────────────────────────────
 // All error paths funnel through one helper so the wire format stays
@@ -388,389 +416,23 @@ function buildPrompt(request) {
 
 // ── SQL Extraction ────────────────────────────────────────────
 
-function extractSql(content) {
-  // Accept common BigQuery fence labels models actually emit.
-  const labeled = content.match(/```(?:sql|bigquery|bq|googlesql)\s*\n([\s\S]*?)```/i);
-  if (labeled) return labeled[1].trim();
-  // Fallback: bare fenced block whose body clearly looks like SQL.
-  const bare = content.match(/```\s*\n([\s\S]*?)```/);
-  if (bare) {
-    const body = bare[1];
-    if (/\b(SELECT|WITH|CREATE|INSERT|UPDATE|DELETE|MERGE)\b/i.test(body)) {
-      return body.trim();
-    }
-  }
-  return null;
-}
-
-// ── STM Extraction ────────────────────────────────────────────
-
+// Thin wrapper that supplies the session-scoped version counter so the
+// extractor in output-parsers.js stays pure.
 function extractStm(content, request, sessionId) {
-  const match = content.match(/```stm\s*\n([\s\S]*?)```/i);
-  if (!match) return null;
-
-  try {
-    const parsed = JSON.parse(match[1].trim());
-    if (!parsed.rows || !Array.isArray(parsed.rows)) return null;
-
-    // Determine source type from request
-    let source = 'text';
-    if (request.jiraInput?.project && request.jiraInput?.storyNumber) source = 'jira';
-
-    return {
-      rows: parsed.rows.map(r => ({
-        sourceField: String(r.sourceField || ''),
-        sourceTable: String(r.sourceTable || ''),
-        sourceType: String(r.sourceType || ''),
-        targetColumn: String(r.targetColumn || ''),
-        targetTable: String(r.targetTable || ''),
-        targetType: String(r.targetType || ''),
-        transformation: String(r.transformation || ''),
-        businessRule: String(r.businessRule || ''),
-        notes: String(r.notes || ''),
-      })),
-      title: String(parsed.title || 'Source-to-Target Mapping'),
-      description: String(parsed.description || 'Auto-generated STM artifact'),
-      source,
-      jiraRef: source === 'jira' ? `${request.jiraInput.project}-${request.jiraInput.storyNumber}` : undefined,
-      bqProject: String(request.bqProjectId || ''),
-      bqDataset: String(request.bqDatasetId || ''),
-      generatedAt: new Date().toISOString(),
-      version: nextStmVersion(sessionId),
-    };
-  } catch (err) {
-    console.error(`  [stm] Failed to parse STM JSON: ${err.message}`);
-    return null;
-  }
-}
-
-// ── L2: Deterministic SQL ↔ STM structural validators ───────
-// These run without any LLM. They parse the SQL and STM mechanically and
-// compare structural elements: target column coverage, source table coverage,
-// target object match, output schema vs declared types. The bridge owns
-// these verdicts. No interpretation, no bias.
-
-function parseStmRows(stmBlock) {
-  if (!stmBlock) return null;
-  try {
-    const parsed = JSON.parse(stmBlock.trim());
-    if (!parsed.rows || !Array.isArray(parsed.rows)) return null;
-    return parsed.rows.map((r) => ({
-      sourceField: String(r.sourceField || '').trim(),
-      sourceTable: String(r.sourceTable || '').trim(),
-      sourceType: String(r.sourceType || '').trim().toUpperCase(),
-      targetColumn: String(r.targetColumn || '').trim(),
-      targetTable: String(r.targetTable || '').trim(),
-      targetType: String(r.targetType || '').trim().toUpperCase(),
-    }));
-  } catch {
-    return null;
-  }
-}
-
-// Strip SQL strings and comments to make table/column parsing safer.
-function stripSqlLiteralsAndComments(sql) {
-  return String(sql || '')
-    .replace(/--[^\n]*/g, ' ')           // line comments
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')   // block comments
-    .replace(/'(?:[^'\\]|\\.|'')*'/g, "''")  // single-quoted strings
-    .replace(/"(?:[^"\\]|\\.|"")*"/g, '""'); // double-quoted (identifiers we don't care about here)
-}
-
-// Find the column aliases of the *outermost* SELECT — i.e. the columns the
-// query actually returns to the caller. We pick the last top-level SELECT
-// before any closing constructs and pull its column list.
-function extractFinalSelectColumns(sql) {
-  const stripped = stripSqlLiteralsAndComments(sql);
-  // Find every top-level SELECT (depth 0); the LAST one is the output shape.
-  let depth = 0;
-  const selects = []; // { start, end }
-  const upper = stripped.toUpperCase();
-  for (let i = 0; i < stripped.length; i++) {
-    const ch = stripped[i];
-    if (ch === '(') depth++;
-    else if (ch === ')') depth = Math.max(0, depth - 1);
-    if (depth === 0 && upper.startsWith('SELECT', i) && /\W/.test(stripped[i - 1] || ' ')) {
-      // Find the matching FROM at depth 0
-      let d = 0;
-      for (let j = i + 6; j < stripped.length; j++) {
-        const c = stripped[j];
-        if (c === '(') d++;
-        else if (c === ')') d = Math.max(0, d - 1);
-        if (d === 0 && upper.startsWith('FROM', j) && /\W/.test(stripped[j - 1] || ' ') && /\W/.test(stripped[j + 4] || ' ')) {
-          selects.push({ start: i + 6, end: j });
-          i = j;
-          break;
-        }
-      }
+  const parsed = extractStmRaw(content, request, nextStmVersion(sessionId));
+  if (!parsed) {
+    if (/```stm\s*\n/i.test(content || '')) {
+      // STM block existed but parse failed — surface for the operator.
+      rootLogger.warn('Failed to parse STM JSON block');
     }
   }
-  if (selects.length === 0) return [];
-  const last = selects[selects.length - 1];
-  const colSegment = stripped.slice(last.start, last.end);
-
-  // Split by top-level commas
-  const cols = [];
-  let buf = '';
-  let d = 0;
-  for (const ch of colSegment) {
-    if (ch === '(') d++;
-    else if (ch === ')') d = Math.max(0, d - 1);
-    if (ch === ',' && d === 0) {
-      cols.push(buf.trim());
-      buf = '';
-    } else {
-      buf += ch;
-    }
-  }
-  if (buf.trim()) cols.push(buf.trim());
-
-  // For each expression, extract the trailing alias (the actual output name).
-  return cols
-    .map((expr) => {
-      const m = expr.match(/(?:\bAS\s+)?([`"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*$/i);
-      return m ? m[2] : null;
-    })
-    .filter(Boolean);
+  return parsed;
 }
 
-// Extract every table referenced in FROM / JOIN clauses (project.dataset.table
-// or dataset.table or table). Returns the bare table name in lowercase for
-// matching purposes.
-function extractSourceTables(sql) {
-  const stripped = stripSqlLiteralsAndComments(sql).replace(/`/g, '');
-  const tables = new Set();
-  const re = /\b(?:FROM|JOIN)\s+([A-Za-z_][\w-]*(?:\.[A-Za-z_][\w-]*){0,2})/gi;
-  let m;
-  while ((m = re.exec(stripped))) {
-    tables.add(m[1].toLowerCase());
-  }
-  return Array.from(tables);
-}
-
-// Best-effort detection of the target object the SQL is producing. If the
-// SQL is a CREATE TABLE/VIEW statement, return the named target. Otherwise
-// returns null (caller can fall back to the request's target scope).
-function extractTargetTable(sql) {
-  const stripped = stripSqlLiteralsAndComments(sql).replace(/`/g, '');
-  const m = stripped.match(/CREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE|VIEW|MATERIALIZED\s+VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][\w-]*(?:\.[A-Za-z_][\w-]*){0,2})/i);
-  return m ? m[1].toLowerCase() : null;
-}
-
-// Canonicalise an MCP tool_result content into a structured object when
-// possible. Different MCP servers wrap their responses differently:
-//
-//   • Raw JSON string:           "{ \"statistics\": ... }"
-//   • Already-parsed object:     { statistics: ... }
-//   • Anthropic content array:   [{ type: "text", text: "{...}" }, ...]
-//   • Plain text summary:        "Query valid. Estimated 1.2 GB."
-//
-// Returns { json: object|null, text: string }. `json` is the parsed payload
-// when extractable; `text` is the best-effort string form (for error
-// messages, logging, fallback heuristics).
-function canonicaliseToolResultContent(content) {
-  if (content === null || content === undefined) return { json: null, text: '' };
-
-  // Pre-parsed object — try to use directly.
-  if (typeof content === 'object' && !Array.isArray(content)) {
-    return { json: content, text: safeJsonStringify(content) };
-  }
-
-  // Anthropic content array — concatenate text blocks.
-  if (Array.isArray(content)) {
-    const textParts = [];
-    for (const block of content) {
-      if (block && typeof block === 'object' && typeof block.text === 'string') {
-        textParts.push(block.text);
-      } else if (typeof block === 'string') {
-        textParts.push(block);
-      }
-    }
-    const joined = textParts.join('\n');
-    const json = tryParseJson(joined);
-    return { json, text: joined };
-  }
-
-  if (typeof content === 'string') {
-    const json = tryParseJson(content);
-    return { json, text: content };
-  }
-
-  return { json: null, text: String(content) };
-}
-
-function tryParseJson(text) {
-  if (!text || typeof text !== 'string') return null;
-  const trimmed = text.trim();
-  if (!trimmed || (trimmed[0] !== '{' && trimmed[0] !== '[')) return null;
-  try { return JSON.parse(trimmed); } catch { return null; }
-}
-
-function safeJsonStringify(value) {
-  try { return JSON.stringify(value); } catch { return String(value); }
-}
-
-// BigQuery dry-run responses (when surfaced through the MCP unchanged) include
-// `statistics.query.schema.fields[]`. Try to find it via the canonical parser.
-// Returns the fields array or null if not present in any recognised shape.
-function parseDryRunOutputSchema(resultText) {
-  const { json } = canonicaliseToolResultContent(resultText);
-  if (!json) return null;
-  const fields =
-    json?.statistics?.query?.schema?.fields ||
-    json?.schema?.fields ||
-    json?.outputSchema ||
-    null;
-  if (!Array.isArray(fields)) return null;
-  return fields.map((f) => ({
-    name: String(f.name || '').trim(),
-    type: String(f.type || f.fieldType || '').trim().toUpperCase(),
-  })).filter((f) => f.name);
-}
-
-// Normalise type strings so STM "INTEGER" matches BQ "INT64", etc.
-function canonicalBqType(t) {
-  const v = String(t || '').toUpperCase();
-  if (v === 'INTEGER' || v === 'INT') return 'INT64';
-  if (v === 'FLOAT' || v === 'DOUBLE') return 'FLOAT64';
-  if (v === 'BOOL') return 'BOOLEAN';
-  return v;
-}
-
-// Compare table references with tail-matching — the SQL may reference
-// `project.dataset.table` while the STM declared just `table`, or vice versa.
-function tablesMatch(a, b) {
-  const ap = a.toLowerCase().split('.').filter(Boolean);
-  const bp = b.toLowerCase().split('.').filter(Boolean);
-  if (ap.length === 0 || bp.length === 0) return false;
-  const min = Math.min(ap.length, bp.length);
-  for (let i = 1; i <= min; i++) {
-    if (ap[ap.length - i] !== bp[bp.length - i]) return false;
-  }
-  return true;
-}
-
-// Runs all L2 structural checks against the extracted artifacts.
-// Returns: { status: 'pass'|'fail'|'warning', summary, checks[] }
-function runStructuralChecks(sqlBlock, stmBlock, lastDryRunResultText) {
-  const checks = [];
-
-  const stmRows = parseStmRows(stmBlock);
-  if (!stmRows || stmRows.length === 0) {
-    return {
-      status: 'warning',
-      summary: 'STM block was missing or unparsable — structural checks could not run.',
-      checks: ['STM JSON block is required for L2 structural validation.'],
-    };
-  }
-
-  // Check 1 — target column coverage
-  const sqlOutputCols = extractFinalSelectColumns(sqlBlock).map((c) => c.toLowerCase());
-  const stmTargetCols = stmRows.map((r) => r.targetColumn).filter(Boolean);
-  const missingCols = stmTargetCols.filter(
-    (c) => c && !sqlOutputCols.includes(c.toLowerCase())
-  );
-  checks.push({
-    name: 'target_column_coverage',
-    status: missingCols.length === 0 ? 'pass' : 'fail',
-    detail: missingCols.length === 0
-      ? `All ${stmTargetCols.length} STM target columns appear in the SQL output.`
-      : `Missing in SQL output: ${missingCols.join(', ')}.`,
-  });
-
-  // Check 2 — source table coverage
-  const sqlTables = extractSourceTables(sqlBlock);
-  const stmSourceTables = Array.from(new Set(stmRows.map((r) => r.sourceTable).filter(Boolean)));
-  const missingTables = stmSourceTables.filter(
-    (st) => !sqlTables.some((qt) => tablesMatch(st, qt))
-  );
-  checks.push({
-    name: 'source_table_coverage',
-    status: missingTables.length === 0 ? 'pass' : 'fail',
-    detail: missingTables.length === 0
-      ? `All ${stmSourceTables.length} STM source table(s) referenced by the SQL.`
-      : `Missing FROM/JOIN reference: ${missingTables.join(', ')}.`,
-  });
-
-  // Check 3 — target table match
-  const sqlTarget = extractTargetTable(sqlBlock);
-  const stmTarget = stmRows[0]?.targetTable || '';
-  if (!sqlTarget) {
-    checks.push({
-      name: 'target_table_match',
-      status: 'warning',
-      detail: 'SQL has no CREATE TABLE/VIEW statement; target object cannot be verified.',
-    });
-  } else if (!stmTarget) {
-    checks.push({
-      name: 'target_table_match',
-      status: 'warning',
-      detail: 'STM rows did not declare a target table.',
-    });
-  } else if (tablesMatch(sqlTarget, stmTarget)) {
-    checks.push({
-      name: 'target_table_match',
-      status: 'pass',
-      detail: `SQL target ${sqlTarget} matches STM target ${stmTarget}.`,
-    });
-  } else {
-    checks.push({
-      name: 'target_table_match',
-      status: 'fail',
-      detail: `SQL target ${sqlTarget} does not match STM target ${stmTarget}.`,
-    });
-  }
-
-  // Check 4 — output schema vs STM target columns/types (from BQ dry-run)
-  const schema = parseDryRunOutputSchema(lastDryRunResultText);
-  if (!schema) {
-    checks.push({
-      name: 'output_schema_vs_stm',
-      status: 'not_run',
-      detail: 'BigQuery dry-run response did not expose the output schema (MCP wrapping); type-level check skipped.',
-    });
-  } else {
-    const stmByName = new Map(stmRows.map((r) => [r.targetColumn.toLowerCase(), r]));
-    const schemaByName = new Map(schema.map((f) => [f.name.toLowerCase(), f]));
-    const schemaNames = new Set(schemaByName.keys());
-    const stmNames = new Set(stmByName.keys());
-    const missingFromSchema = [...stmNames].filter((n) => !schemaNames.has(n));
-    const extraInSchema = [...schemaNames].filter((n) => !stmNames.has(n));
-    const typeMismatches = [];
-    for (const [name, field] of schemaByName) {
-      const stmRow = stmByName.get(name);
-      if (!stmRow || !stmRow.targetType) continue;
-      const sqlType = canonicalBqType(field.type);
-      const stmType = canonicalBqType(stmRow.targetType);
-      if (sqlType !== stmType) {
-        typeMismatches.push(`${name}: SQL=${sqlType}, STM=${stmType}`);
-      }
-    }
-    const schemaIssues = [];
-    if (missingFromSchema.length) schemaIssues.push(`Declared in STM but missing from SQL output: ${missingFromSchema.join(', ')}.`);
-    if (extraInSchema.length) schemaIssues.push(`Produced by SQL but not in STM: ${extraInSchema.join(', ')}.`);
-    if (typeMismatches.length) schemaIssues.push(`Type mismatch — ${typeMismatches.join('; ')}.`);
-
-    checks.push({
-      name: 'output_schema_vs_stm',
-      status: schemaIssues.length === 0 ? 'pass' : 'fail',
-      detail: schemaIssues.length === 0
-        ? `BigQuery dry-run output schema matches STM (${schema.length} columns).`
-        : schemaIssues.join(' '),
-    });
-  }
-
-  const anyFail = checks.some((c) => c.status === 'fail');
-  const anyWarning = checks.some((c) => c.status === 'warning' || c.status === 'not_run');
-  const status = anyFail ? 'fail' : anyWarning ? 'warning' : 'pass';
-  const summary = anyFail
-    ? 'SQL does not structurally match the STM. See check details.'
-    : anyWarning
-      ? 'SQL aligns with the STM for verifiable checks; some checks could not be run.'
-      : 'SQL structurally matches the STM on all checks.';
-
-  return { status, summary, checks };
-}
+// L2 structural validation moved to ./structural-checks.js.
+// Activity event normalisers moved to ./activity.js.
+// Tool result parsing helpers moved to ./tool-helpers.js.
+// SQL/STM/clarification/terminal extractors moved to ./output-parsers.js.
 
 function extractValidationSummary(content, request = {}) {
   const hasSql = !!extractSql(content);
@@ -850,27 +512,6 @@ function extractValidationSummary(content, request = {}) {
     inferences,
     activityDetails,
   });
-}
-
-function detectTerminalRunIssue(content) {
-  const text = String(content || '');
-  if (/hit your limit|usage limit|rate limit|resets?\s+\d|quota/i.test(text)) {
-    const limitLine = text
-      .split('\n')
-      .map((line) => line.trim())
-      .find((line) => /hit your limit|usage limit|rate limit|resets?\s+\d|quota/i.test(line));
-    return {
-      kind: 'claude_limit',
-      message: limitLine || 'Claude Code hit a usage or rate limit before returning SQL.',
-      hint: 'Retry after the Claude Code limit resets; the workflow state and prior clarification can be reused.',
-    };
-  }
-
-  return {
-    kind: 'missing_sql',
-    message: 'Claude Code completed but did not return a fenced SQL block.',
-    hint: 'Ask Claude to retry generation or provide the missing context requested in the activity output.',
-  };
 }
 
 function buildTerminalFailureValidationSummary(content, request = {}, issue = detectTerminalRunIssue(content)) {
@@ -1065,66 +706,6 @@ function hasUsableSection(section) {
   );
 }
 
-const ACTIVITY_TYPES = new Set(['observation', 'inference', 'decision', 'validation', 'error', 'artifact']);
-const ACTIVITY_STATUSES = new Set(['running', 'completed', 'warning', 'failed', 'blocked', 'pending']);
-const ACTIVITY_SOURCES = new Set(['claude', 'bridge', 'jira', 'bigquery', 'github', 'offline', 'fallback']);
-
-function inferActivityType(text) {
-  const value = String(text || '').toLowerCase();
-  if (/error|failed|failure|limit|blocked|missing|not found|denied|unable/.test(value)) return 'error';
-  if (/infer|assum|confidence|candidate|proposed|likely/.test(value)) return 'inference';
-  if (/decision|selected|chosen|approved|load pattern|object type|partition|cluster/.test(value)) return 'decision';
-  if (/validat|dry run|dry-run|dryrun|audit|check|coverage/.test(value)) return 'validation';
-  if (/stm|sql|artifact|download|file/.test(value)) return 'artifact';
-  return 'observation';
-}
-
-function normalizeActivityStatus(status) {
-  const value = String(status || '').toLowerCase();
-  if (ACTIVITY_STATUSES.has(value)) return value;
-  if (value === 'active') return 'running';
-  if (value === 'pass') return 'completed';
-  if (value === 'fail') return 'failed';
-  if (value === 'not_run') return 'pending';
-  return 'completed';
-}
-
-function normalizeActivitySource(source) {
-  const value = String(source || '').toLowerCase();
-  return ACTIVITY_SOURCES.has(value) ? value : 'fallback';
-}
-
-function normalizeActivityType(type, text) {
-  const value = String(type || '').toLowerCase();
-  if (value === 'tool') return inferActivityType(text); // never expose tool-typed events
-  return ACTIVITY_TYPES.has(value) ? value : inferActivityType(text);
-}
-
-function normalizeStringList(value) {
-  if (!Array.isArray(value)) return undefined;
-  const list = value.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 8);
-  return list.length > 0 ? list : undefined;
-}
-
-function makeActivityEvent(event = {}) {
-  const summary = String(event.summary || event.title || 'Claude Code activity').trim();
-  const title = String(event.title || summary).trim();
-  const stage = event.stage || inferActivityStage(`${title} ${summary}`);
-  return {
-    id: event.id,
-    stage,
-    type: normalizeActivityType(event.type, `${title} ${summary}`),
-    status: normalizeActivityStatus(event.status),
-    title,
-    summary,
-    details: normalizeStringList(event.details),
-    confidence: typeof event.confidence === 'number' ? event.confidence : undefined,
-    evidence: normalizeStringList(event.evidence),
-    timestamp: typeof event.timestamp === 'number' && event.timestamp > 0 ? event.timestamp : Date.now(),
-    source: normalizeActivitySource(event.source),
-  };
-}
-
 function validationStatusToActivityStatus(status) {
   const value = normalizeValidationStatus(status);
   if (value === 'pass') return 'completed';
@@ -1278,43 +859,6 @@ function normalizeValidationSummary(summary, context = {}) {
 // ── Clarification Detection ───────────────────────────────────
 // Relies solely on the [CLARIFY] sentinel that the prompt instructs
 // Claude to include — avoids brittle phrase-list matching.
-
-function isClarificationRequest(content) {
-  return typeof content === 'string' && content.includes('[CLARIFY]');
-}
-
-function extractClarification(content) {
-  const rawContent = String(content || '');
-  const detailText = rawContent
-    .replace(/\[CLARIFY\]/g, '')
-    .replace(/```clarification\s*\n[\s\S]*?```/gi, '')
-    .trim();
-  const fallback = {
-    message: detailText,
-    details: detailText,
-    needsInput: true,
-  };
-  const match = rawContent.match(/```clarification\s*\n([\s\S]*?)```/i);
-  if (!match) return fallback;
-
-  try {
-    const parsed = JSON.parse(match[1].trim());
-    const options = Array.isArray(parsed.options)
-      ? parsed.options.map((option) => String(option)).filter(Boolean).slice(0, 5)
-      : undefined;
-
-    return {
-      explanation: parsed.explanation ? String(parsed.explanation) : undefined,
-      message: String(parsed.question || parsed.message || fallback.message),
-      details: parsed.details ? String(parsed.details) : detailText || undefined,
-      options,
-      allowFreeText: parsed.allowFreeText !== false,
-      needsInput: true,
-    };
-  } catch {
-    return fallback;
-  }
-}
 
 // ── Pipeline Stage Mapping ────────────────────────────────────
 
@@ -1580,45 +1124,10 @@ function mapToolToActivityMessage(toolName, toolInput = {}) {
   return 'Claude Code is working on the request.';
 }
 
-function inferActivityStage(message) {
-  const text = String(message || '').toLowerCase();
-  if (/jira|story|requirement|acceptance|intake|analyz|analysis|s0[1-4]/.test(text)) return 'analysis';
-  if (/schema|dataset|table|column|reconcil|candidate|bigquery|bq|s0[5-6]/.test(text)) return 'schema_resolution';
-  if (/stm|mapping|source-to-target|logic model|generate|sql writer|s0[7-9]|s10/.test(text)) return 'sql_generation';
-  if (/validat|dry run|dry-run|dryrun|self-audit|jira comment|transition|s1[1-2]/.test(text)) return 'validation';
-  if (/ready|complete|sql_ready/.test(text)) return 'ready';
-  return 'analysis';
-}
-
 // ── Semantic tool → architect-readable finding ───────────────
 // Each MCP tool call is paired with its tool_result (by tool_use_id) so we
 // can synthesize one finding card with the actual learned content, in
 // architect language — never plumbing terms like "Called", "Invoked", "MCP".
-
-function safeJsonParse(text) {
-  if (!text || typeof text !== 'string') return null;
-  try { return JSON.parse(text); } catch { return null; }
-}
-
-function pickStrings(arr, fields, limit = 8) {
-  if (!Array.isArray(arr)) return [];
-  const out = [];
-  for (const item of arr) {
-    if (typeof item === 'string') { out.push(item); continue; }
-    if (item && typeof item === 'object') {
-      for (const f of fields) {
-        if (typeof item[f] === 'string' && item[f].trim()) { out.push(item[f]); break; }
-      }
-    }
-    if (out.length >= limit) break;
-  }
-  return out;
-}
-
-function clipForActivity(text, max = 220) {
-  const s = String(text || '').replace(/\s+/g, ' ').trim();
-  return s.length > max ? `${s.slice(0, max)}…` : s;
-}
 
 function semanticFindingFromToolPair(toolName, toolInput, toolResultText, isError) {
   const name = String(toolName || '').toLowerCase();

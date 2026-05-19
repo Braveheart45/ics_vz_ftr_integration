@@ -59,6 +59,25 @@ function parseBool(raw) {
   return String(raw).toLowerCase() === 'true';
 }
 
+/**
+ * @typedef {Object} BridgeConfig
+ * @property {number} port
+ * @property {Readonly<{maxTurns:number, timeoutMs:number, maxConcurrent:number}>} claude
+ * @property {Readonly<{maxHistoryMessages:number, maxRequestBodyBytes:number, maxStreamBufferBytes:number}>} server
+ * @property {Readonly<{offlineDryRunEnabled:boolean, requireSqlChecksPass:boolean, jiraCompletionEnabled:boolean, l3CoverageCheckEnabled:boolean}>} features
+ * @property {Readonly<{jiraCompletionMs:number, l3CoverageMs:number}>} timeouts
+ * @property {readonly string[]} jiraWriteTools
+ * @property {string} logLevel
+ */
+
+/**
+ * Read, validate, coerce, and freeze the bridge's runtime config. Throws an
+ * Error whose message lists every invalid setting when validation fails so
+ * the operator can fix them all in one pass.
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {Readonly<BridgeConfig>}
+ */
 function loadConfig(env = process.env) {
   const errors = [];
   const read = (key) => (env[key] !== undefined && env[key] !== '' ? env[key] : DEFAULTS[key]);
