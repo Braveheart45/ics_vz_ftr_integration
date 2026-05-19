@@ -5,6 +5,8 @@ import {
   AlertTriangle,
   Bot,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   CircleDashed,
   ClipboardCheck,
   Database,
@@ -87,6 +89,119 @@ function formatTime(timestamp: number): string {
 
 function eventMatchesFilter(event: AgentActivityEvent, filter: AgentActivityType | 'all') {
   return filter === 'all' || event.type === filter;
+}
+
+// ── Compact Run Summary Card ─────────────────────────────────────
+// Extracts the top confidence value, key decisions, and key assumptions
+// from the live activity stream so the architect sees a one-glance digest
+// rather than having to scroll through all cards.
+
+interface RunSummary {
+  overallConfidence: number | null;
+  decisions: string[];
+  assumptions: string[];
+}
+
+function buildRunSummary(events: AgentActivityEvent[]): RunSummary | null {
+  const decisionEvents = events.filter((e) => e.type === 'decision');
+  const inferenceEvents = events.filter((e) => e.type === 'inference');
+
+  if (decisionEvents.length === 0 && inferenceEvents.length === 0) return null;
+
+  const confidenceValues = events
+    .map((e) => e.confidence)
+    .filter((c): c is number => typeof c === 'number');
+  const overallConfidence = confidenceValues.length > 0
+    ? Math.round(confidenceValues.reduce((a, b) => a + b, 0) / confidenceValues.length)
+    : null;
+
+  const decisions = decisionEvents
+    .slice(0, 3)
+    .map((e) => e.summary || e.title)
+    .filter(Boolean);
+
+  const assumptions = inferenceEvents
+    .slice(0, 3)
+    .map((e) => e.summary || e.title)
+    .filter(Boolean);
+
+  return { overallConfidence, decisions, assumptions };
+}
+
+function RunSummaryCard({ events }: { events: AgentActivityEvent[] }) {
+  const [open, setOpen] = useState(true);
+  const summary = useMemo(() => buildRunSummary(events), [events]);
+  if (!summary) return null;
+
+  const { overallConfidence, decisions, assumptions } = summary;
+  const confidenceColor =
+    overallConfidence === null ? 'text-muted-foreground'
+    : overallConfidence >= 80 ? 'text-emerald-600'
+    : overallConfidence >= 60 ? 'text-amber-600'
+    : 'text-red-500';
+
+  return (
+    <div className="shrink-0 rounded-lg border border-border/60 bg-muted/20 shadow-[0_1px_2px_0_oklch(0_0_0/0.04)]">
+      {/* Header */}
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left"
+      >
+        {open ? <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" /> : <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />}
+        <span className="text-[11px] font-semibold text-foreground/80 flex-1">Run Summary</span>
+        {overallConfidence !== null && (
+          <span className={cn('text-[11px] font-bold tabular-nums', confidenceColor)}>
+            {overallConfidence}% avg confidence
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <div className="grid grid-cols-2 gap-px border-t border-border/40 bg-border/20">
+          {/* Decisions */}
+          <div className="bg-background px-3 py-2">
+            <p className="mb-1.5 flex items-center gap-1 text-[9px] font-bold uppercase tracking-[0.06em] text-muted-foreground">
+              <GitBranch className="size-3" />
+              Key Decisions
+            </p>
+            {decisions.length > 0 ? (
+              <ul className="space-y-1">
+                {decisions.map((d, i) => (
+                  <li key={i} className="flex gap-1.5 text-[10px] leading-snug text-foreground/75">
+                    <span className="mt-1 size-1 shrink-0 rounded-full bg-[#4285F4]/60" />
+                    {d}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-[10px] italic text-muted-foreground">None yet</p>
+            )}
+          </div>
+
+          {/* Assumptions */}
+          <div className="bg-background px-3 py-2">
+            <p className="mb-1.5 flex items-center gap-1 text-[9px] font-bold uppercase tracking-[0.06em] text-muted-foreground">
+              <Lightbulb className="size-3" />
+              Assumptions
+            </p>
+            {assumptions.length > 0 ? (
+              <ul className="space-y-1">
+                {assumptions.map((a, i) => (
+                  <li key={i} className="flex gap-1.5 text-[10px] leading-snug text-foreground/75">
+                    <span className="mt-1 size-1 shrink-0 rounded-full bg-amber-500/60" />
+                    {a}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="text-[10px] italic text-muted-foreground">None yet</p>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 
@@ -255,6 +370,8 @@ export function ValidationSummaryPane() {
         </div>
 
         <div className="flex flex-1 min-h-0 flex-col gap-3 overflow-y-auto bg-background p-3 custom-scrollbar">
+          <RunSummaryCard events={visibleEvents} />
+
           {filteredEvents.length === 0 ? (
             <div className="flex flex-1 items-center justify-center px-4 text-center">
               <div>

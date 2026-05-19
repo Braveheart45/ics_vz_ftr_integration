@@ -160,9 +160,9 @@ export default function Home() {
           direction="horizontal"
           autoSaveId="sql-curator-main-layout"
         >
-          {/* Left — SQL Output */}
-          <ResizablePanel defaultSize={40} minSize={15} className="animate-slide-in-left">
-            <LeftPanel />
+          {/* Left — Intake & Clarification */}
+          <ResizablePanel defaultSize={30} minSize={15} className="animate-slide-in-left">
+            <RightPanel />
           </ResizablePanel>
 
           <ResizableHandle withHandle />
@@ -176,9 +176,9 @@ export default function Home() {
 
           <ResizableHandle withHandle />
 
-          {/* Right — Intake & Clarification */}
-          <ResizablePanel defaultSize={30} minSize={15} className="animate-slide-in-right">
-            <RightPanel />
+          {/* Right — SQL Output */}
+          <ResizablePanel defaultSize={40} minSize={15} className="animate-slide-in-right">
+            <LeftPanel />
           </ResizablePanel>
         </ResizablePanelGroup>
       </div>

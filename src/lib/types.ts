@@ -1,10 +1,10 @@
 // ============================================================
-// AI-Powered SQL Generation & Legacy SQL Conversion Agent
-// Split-Screen Enterprise UI — Type Definitions
+// SQL Curator — BigQuery SQL Generation Tool
+// Type Definitions
 // ============================================================
 
-// Task types
-export type TaskType = 'auto_detect' | 'sql_generation' | 'legacy_sql_conversion' | 'github_deploy';
+// Task types — generation only; conversion is out of scope.
+export type TaskType = 'sql_generation' | 'github_deploy';
 
 // Workflow pipeline stages
 export type WorkflowStage =
@@ -158,7 +158,7 @@ export interface StmArtifact {
   rows: StmRow[];
   title: string;
   description: string;
-  source: 'jira' | 'file' | 'text' | 'legacy_sql';
+  source: 'jira' | 'file' | 'text';
   jiraRef?: string;
   bqProject: string;
   bqDataset?: string;

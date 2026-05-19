@@ -110,7 +110,7 @@ function generateSessionId(): string {
 // ============================================================
 
 const initialState = {
-  taskType: 'auto_detect' as TaskType,
+  taskType: 'sql_generation' as TaskType,
   detectedTask: null as DetectedTaskInfo | null,
 
   jiraInput: { project: '', storyNumber: '' } as JiraInput,

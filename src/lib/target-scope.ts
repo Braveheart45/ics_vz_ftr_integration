@@ -1,9 +1,7 @@
 import type { AgentRequest } from '@/lib/agent';
 
 export const ALLOWED_TASK_TYPES = new Set([
-  'auto_detect',
   'sql_generation',
-  'legacy_sql_conversion',
   'github_deploy',
 ]);
 

@@ -31,38 +31,83 @@ const { spawn, spawnSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
+
+const { loadConfig } = require('./config');
+const { createLogger, setLevel: setLogLevel, root: rootLogger } = require('./logging');
+const metrics = require('./metrics');
+const { validateChatBody } = require('./request-validation');
+
+// ── Structured error responses ───────────────────────────────
+// All error paths funnel through one helper so the wire format stays
+// consistent and stack traces never leak to clients.
+function sendError(res, status, code, message, extra = {}) {
+  if (res.headersSent) return; // SSE responses are handled inline.
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({
+    error: { code, message, ...extra },
+  }));
+}
 
 // ── Configuration ─────────────────────────────────────────────
+// Fail-fast at module load: malformed env vars throw with an aggregated list.
+const CONFIG = loadConfig();
+setLogLevel(CONFIG.logLevel);
 
-const PORT = parseInt(process.env.BRIDGE_PORT || '3001', 10);
-const CLAUDE_MAX_TURNS = parseInt(process.env.CLAUDE_MAX_TURNS || '25', 10);
-const CLAUDE_TIMEOUT_MS = parseInt(process.env.CLAUDE_TIMEOUT_MS || '1200000', 10);
-const MAX_HISTORY_MESSAGES = parseInt(process.env.MAX_HISTORY_MESSAGES || '20', 10);
-const MAX_CONCURRENT = parseInt(process.env.CLAUDE_MAX_CONCURRENT || '3', 10);
-const MAX_REQUEST_BODY_BYTES = parseInt(process.env.SQL_CURATOR_MAX_REQUEST_BODY_BYTES || String(2 * 1024 * 1024), 10);
-const OFFLINE_DRY_RUN_ENABLED = process.env.SQL_CURATOR_ENABLE_OFFLINE_DRY_RUN === 'true';
-// Strict gate: refuse to surface generated SQL unless Claude's structured
-// validation.sqlChecks.status is exactly 'pass'. Defaults to enabled.
-// Disable with SQL_CURATOR_REQUIRE_DRYRUN_PASS=false for development only.
-const REQUIRE_SQLCHECKS_PASS = process.env.SQL_CURATOR_REQUIRE_DRYRUN_PASS !== 'false';
-// Two-pass Jira ordering. During the main run we block the Jira write tools
-// so Claude cannot post the comment or transition the issue before validation
-// completes. After the strict gate passes, the bridge spawns a focused
-// follow-up Claude session that resumes the same conversation with these
-// tools allowed and instructs Claude to perform ONLY the Jira completion.
-const DEFAULT_JIRA_WRITE_TOOLS = [
-  'mcp__claude_ai_Atlassian_Rovo__addCommentToJiraIssue',
-  'mcp__claude_ai_Atlassian_Rovo__addWorklogToJiraIssue',
-  'mcp__claude_ai_Atlassian_Rovo__transitionJiraIssue',
-  'mcp__claude_ai_Atlassian_Rovo__editJiraIssue',
-  'mcp__claude_ai_Atlassian_Rovo__createJiraIssue',
-  'mcp__claude_ai_Atlassian_Rovo__createIssueLink',
-];
-const JIRA_WRITE_TOOLS = (process.env.SQL_CURATOR_JIRA_WRITE_TOOLS || '').trim()
-  ? process.env.SQL_CURATOR_JIRA_WRITE_TOOLS.split(',').map((t) => t.trim()).filter(Boolean)
-  : DEFAULT_JIRA_WRITE_TOOLS;
-const JIRA_COMPLETION_ENABLED = process.env.SQL_CURATOR_DEFER_JIRA_COMPLETION !== 'false';
-const JIRA_COMPLETION_TIMEOUT_MS = parseInt(process.env.SQL_CURATOR_JIRA_COMPLETION_TIMEOUT_MS || '120000', 10);
+// ── Request-scoped identifiers ───────────────────────────────
+// Every HTTP request gets a short stable ID threaded into logs and error
+// payloads so a single run can be grep'd end-to-end from client → bridge →
+// Claude session → Jira follow-up → L3 cold session.
+function newRequestId() {
+  return crypto.randomUUID().slice(0, 8);
+}
+
+// ── Bridge-level runtime state ───────────────────────────────
+// Exposed via /health and /metrics so operators can see last-error,
+// in-flight counts, and current queue depth without grepping logs.
+const bridgeState = {
+  startedAt: Date.now(),
+  lastErrorAt: null,
+  lastErrorMessage: null,
+};
+function recordError(message) {
+  bridgeState.lastErrorAt = Date.now();
+  bridgeState.lastErrorMessage = String(message || '').slice(0, 500);
+}
+
+// ── Idempotency key tracking ─────────────────────────────────
+// Protects against accidental double-submission of the same request — a
+// refreshed tab, a fat-fingered double-click, a network retry. Within the
+// TTL window, the SAME idempotency key is rejected with 409 instead of
+// spawning a duplicate Claude session (which would cost twice and confuse
+// the conversation state).
+const IDEMPOTENCY_TTL_MS = 10 * 60 * 1000;        // 10 minutes
+const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9_-]{8,128}$/;
+const idempotency = new Map(); // key → { state: 'in_flight'|'completed', requestId, completedAt, succeeded }
+
+function pruneIdempotency() {
+  const now = Date.now();
+  for (const [key, entry] of idempotency) {
+    if (entry.state === 'completed' && (now - entry.completedAt) > IDEMPOTENCY_TTL_MS) {
+      idempotency.delete(key);
+    }
+  }
+}
+// Periodic prune so the map can't grow unbounded under sustained traffic.
+setInterval(pruneIdempotency, 60_000).unref();
+
+const PORT = CONFIG.port;
+const CLAUDE_MAX_TURNS = CONFIG.claude.maxTurns;
+const CLAUDE_TIMEOUT_MS = CONFIG.claude.timeoutMs;
+const MAX_HISTORY_MESSAGES = CONFIG.server.maxHistoryMessages;
+const MAX_CONCURRENT = CONFIG.claude.maxConcurrent;
+const MAX_REQUEST_BODY_BYTES = CONFIG.server.maxRequestBodyBytes;
+const MAX_STREAM_BUFFER_BYTES = CONFIG.server.maxStreamBufferBytes;
+const OFFLINE_DRY_RUN_ENABLED = CONFIG.features.offlineDryRunEnabled;
+const REQUIRE_SQLCHECKS_PASS = CONFIG.features.requireSqlChecksPass;
+const JIRA_WRITE_TOOLS = CONFIG.jiraWriteTools;
+const JIRA_COMPLETION_ENABLED = CONFIG.features.jiraCompletionEnabled;
+const JIRA_COMPLETION_TIMEOUT_MS = CONFIG.timeouts.jiraCompletionMs;
 const BQ_PROJECT_ID_PATTERN = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
 const BQ_DATASET_ID_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,1023}$/;
 
@@ -312,7 +357,7 @@ STRICT GATE: The bridge withholds generated SQL from the UI unless validation.sq
 Generate BigQuery SQL with appropriate source tables, target object, column mappings, joins, filters, aggregations, business rules, null handling, casting, date logic, aliases, and useful comments. Prefer CTEs, SAFE_DIVIDE, COUNTIF, QUALIFY for window filters, COALESCE/IFNULL for nullable inputs, and clear aliases.`;
 
   const parts = [instructions];
-  parts.push(`## Requested Mode\n${taskType || 'auto_detect'}`);
+  parts.push(`## Requested Mode\n${taskType || 'sql_generation'}`);
 
   if (jiraInput?.project || jiraInput?.storyNumber) {
     const storyRef = [jiraInput.project, jiraInput.storyNumber].filter(Boolean).join('-');
@@ -371,7 +416,6 @@ function extractStm(content, request, sessionId) {
     // Determine source type from request
     let source = 'text';
     if (request.jiraInput?.project && request.jiraInput?.storyNumber) source = 'jira';
-    else if (request.taskType === 'legacy_sql_conversion') source = 'legacy_sql';
 
     return {
       rows: parsed.rows.map(r => ({
@@ -398,6 +442,334 @@ function extractStm(content, request, sessionId) {
     console.error(`  [stm] Failed to parse STM JSON: ${err.message}`);
     return null;
   }
+}
+
+// ── L2: Deterministic SQL ↔ STM structural validators ───────
+// These run without any LLM. They parse the SQL and STM mechanically and
+// compare structural elements: target column coverage, source table coverage,
+// target object match, output schema vs declared types. The bridge owns
+// these verdicts. No interpretation, no bias.
+
+function parseStmRows(stmBlock) {
+  if (!stmBlock) return null;
+  try {
+    const parsed = JSON.parse(stmBlock.trim());
+    if (!parsed.rows || !Array.isArray(parsed.rows)) return null;
+    return parsed.rows.map((r) => ({
+      sourceField: String(r.sourceField || '').trim(),
+      sourceTable: String(r.sourceTable || '').trim(),
+      sourceType: String(r.sourceType || '').trim().toUpperCase(),
+      targetColumn: String(r.targetColumn || '').trim(),
+      targetTable: String(r.targetTable || '').trim(),
+      targetType: String(r.targetType || '').trim().toUpperCase(),
+    }));
+  } catch {
+    return null;
+  }
+}
+
+// Strip SQL strings and comments to make table/column parsing safer.
+function stripSqlLiteralsAndComments(sql) {
+  return String(sql || '')
+    .replace(/--[^\n]*/g, ' ')           // line comments
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')   // block comments
+    .replace(/'(?:[^'\\]|\\.|'')*'/g, "''")  // single-quoted strings
+    .replace(/"(?:[^"\\]|\\.|"")*"/g, '""'); // double-quoted (identifiers we don't care about here)
+}
+
+// Find the column aliases of the *outermost* SELECT — i.e. the columns the
+// query actually returns to the caller. We pick the last top-level SELECT
+// before any closing constructs and pull its column list.
+function extractFinalSelectColumns(sql) {
+  const stripped = stripSqlLiteralsAndComments(sql);
+  // Find every top-level SELECT (depth 0); the LAST one is the output shape.
+  let depth = 0;
+  const selects = []; // { start, end }
+  const upper = stripped.toUpperCase();
+  for (let i = 0; i < stripped.length; i++) {
+    const ch = stripped[i];
+    if (ch === '(') depth++;
+    else if (ch === ')') depth = Math.max(0, depth - 1);
+    if (depth === 0 && upper.startsWith('SELECT', i) && /\W/.test(stripped[i - 1] || ' ')) {
+      // Find the matching FROM at depth 0
+      let d = 0;
+      for (let j = i + 6; j < stripped.length; j++) {
+        const c = stripped[j];
+        if (c === '(') d++;
+        else if (c === ')') d = Math.max(0, d - 1);
+        if (d === 0 && upper.startsWith('FROM', j) && /\W/.test(stripped[j - 1] || ' ') && /\W/.test(stripped[j + 4] || ' ')) {
+          selects.push({ start: i + 6, end: j });
+          i = j;
+          break;
+        }
+      }
+    }
+  }
+  if (selects.length === 0) return [];
+  const last = selects[selects.length - 1];
+  const colSegment = stripped.slice(last.start, last.end);
+
+  // Split by top-level commas
+  const cols = [];
+  let buf = '';
+  let d = 0;
+  for (const ch of colSegment) {
+    if (ch === '(') d++;
+    else if (ch === ')') d = Math.max(0, d - 1);
+    if (ch === ',' && d === 0) {
+      cols.push(buf.trim());
+      buf = '';
+    } else {
+      buf += ch;
+    }
+  }
+  if (buf.trim()) cols.push(buf.trim());
+
+  // For each expression, extract the trailing alias (the actual output name).
+  return cols
+    .map((expr) => {
+      const m = expr.match(/(?:\bAS\s+)?([`"]?)([A-Za-z_][A-Za-z0-9_]*)\1\s*$/i);
+      return m ? m[2] : null;
+    })
+    .filter(Boolean);
+}
+
+// Extract every table referenced in FROM / JOIN clauses (project.dataset.table
+// or dataset.table or table). Returns the bare table name in lowercase for
+// matching purposes.
+function extractSourceTables(sql) {
+  const stripped = stripSqlLiteralsAndComments(sql).replace(/`/g, '');
+  const tables = new Set();
+  const re = /\b(?:FROM|JOIN)\s+([A-Za-z_][\w-]*(?:\.[A-Za-z_][\w-]*){0,2})/gi;
+  let m;
+  while ((m = re.exec(stripped))) {
+    tables.add(m[1].toLowerCase());
+  }
+  return Array.from(tables);
+}
+
+// Best-effort detection of the target object the SQL is producing. If the
+// SQL is a CREATE TABLE/VIEW statement, return the named target. Otherwise
+// returns null (caller can fall back to the request's target scope).
+function extractTargetTable(sql) {
+  const stripped = stripSqlLiteralsAndComments(sql).replace(/`/g, '');
+  const m = stripped.match(/CREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE|VIEW|MATERIALIZED\s+VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][\w-]*(?:\.[A-Za-z_][\w-]*){0,2})/i);
+  return m ? m[1].toLowerCase() : null;
+}
+
+// Canonicalise an MCP tool_result content into a structured object when
+// possible. Different MCP servers wrap their responses differently:
+//
+//   • Raw JSON string:           "{ \"statistics\": ... }"
+//   • Already-parsed object:     { statistics: ... }
+//   • Anthropic content array:   [{ type: "text", text: "{...}" }, ...]
+//   • Plain text summary:        "Query valid. Estimated 1.2 GB."
+//
+// Returns { json: object|null, text: string }. `json` is the parsed payload
+// when extractable; `text` is the best-effort string form (for error
+// messages, logging, fallback heuristics).
+function canonicaliseToolResultContent(content) {
+  if (content === null || content === undefined) return { json: null, text: '' };
+
+  // Pre-parsed object — try to use directly.
+  if (typeof content === 'object' && !Array.isArray(content)) {
+    return { json: content, text: safeJsonStringify(content) };
+  }
+
+  // Anthropic content array — concatenate text blocks.
+  if (Array.isArray(content)) {
+    const textParts = [];
+    for (const block of content) {
+      if (block && typeof block === 'object' && typeof block.text === 'string') {
+        textParts.push(block.text);
+      } else if (typeof block === 'string') {
+        textParts.push(block);
+      }
+    }
+    const joined = textParts.join('\n');
+    const json = tryParseJson(joined);
+    return { json, text: joined };
+  }
+
+  if (typeof content === 'string') {
+    const json = tryParseJson(content);
+    return { json, text: content };
+  }
+
+  return { json: null, text: String(content) };
+}
+
+function tryParseJson(text) {
+  if (!text || typeof text !== 'string') return null;
+  const trimmed = text.trim();
+  if (!trimmed || (trimmed[0] !== '{' && trimmed[0] !== '[')) return null;
+  try { return JSON.parse(trimmed); } catch { return null; }
+}
+
+function safeJsonStringify(value) {
+  try { return JSON.stringify(value); } catch { return String(value); }
+}
+
+// BigQuery dry-run responses (when surfaced through the MCP unchanged) include
+// `statistics.query.schema.fields[]`. Try to find it via the canonical parser.
+// Returns the fields array or null if not present in any recognised shape.
+function parseDryRunOutputSchema(resultText) {
+  const { json } = canonicaliseToolResultContent(resultText);
+  if (!json) return null;
+  const fields =
+    json?.statistics?.query?.schema?.fields ||
+    json?.schema?.fields ||
+    json?.outputSchema ||
+    null;
+  if (!Array.isArray(fields)) return null;
+  return fields.map((f) => ({
+    name: String(f.name || '').trim(),
+    type: String(f.type || f.fieldType || '').trim().toUpperCase(),
+  })).filter((f) => f.name);
+}
+
+// Normalise type strings so STM "INTEGER" matches BQ "INT64", etc.
+function canonicalBqType(t) {
+  const v = String(t || '').toUpperCase();
+  if (v === 'INTEGER' || v === 'INT') return 'INT64';
+  if (v === 'FLOAT' || v === 'DOUBLE') return 'FLOAT64';
+  if (v === 'BOOL') return 'BOOLEAN';
+  return v;
+}
+
+// Compare table references with tail-matching — the SQL may reference
+// `project.dataset.table` while the STM declared just `table`, or vice versa.
+function tablesMatch(a, b) {
+  const ap = a.toLowerCase().split('.').filter(Boolean);
+  const bp = b.toLowerCase().split('.').filter(Boolean);
+  if (ap.length === 0 || bp.length === 0) return false;
+  const min = Math.min(ap.length, bp.length);
+  for (let i = 1; i <= min; i++) {
+    if (ap[ap.length - i] !== bp[bp.length - i]) return false;
+  }
+  return true;
+}
+
+// Runs all L2 structural checks against the extracted artifacts.
+// Returns: { status: 'pass'|'fail'|'warning', summary, checks[] }
+function runStructuralChecks(sqlBlock, stmBlock, lastDryRunResultText) {
+  const checks = [];
+
+  const stmRows = parseStmRows(stmBlock);
+  if (!stmRows || stmRows.length === 0) {
+    return {
+      status: 'warning',
+      summary: 'STM block was missing or unparsable — structural checks could not run.',
+      checks: ['STM JSON block is required for L2 structural validation.'],
+    };
+  }
+
+  // Check 1 — target column coverage
+  const sqlOutputCols = extractFinalSelectColumns(sqlBlock).map((c) => c.toLowerCase());
+  const stmTargetCols = stmRows.map((r) => r.targetColumn).filter(Boolean);
+  const missingCols = stmTargetCols.filter(
+    (c) => c && !sqlOutputCols.includes(c.toLowerCase())
+  );
+  checks.push({
+    name: 'target_column_coverage',
+    status: missingCols.length === 0 ? 'pass' : 'fail',
+    detail: missingCols.length === 0
+      ? `All ${stmTargetCols.length} STM target columns appear in the SQL output.`
+      : `Missing in SQL output: ${missingCols.join(', ')}.`,
+  });
+
+  // Check 2 — source table coverage
+  const sqlTables = extractSourceTables(sqlBlock);
+  const stmSourceTables = Array.from(new Set(stmRows.map((r) => r.sourceTable).filter(Boolean)));
+  const missingTables = stmSourceTables.filter(
+    (st) => !sqlTables.some((qt) => tablesMatch(st, qt))
+  );
+  checks.push({
+    name: 'source_table_coverage',
+    status: missingTables.length === 0 ? 'pass' : 'fail',
+    detail: missingTables.length === 0
+      ? `All ${stmSourceTables.length} STM source table(s) referenced by the SQL.`
+      : `Missing FROM/JOIN reference: ${missingTables.join(', ')}.`,
+  });
+
+  // Check 3 — target table match
+  const sqlTarget = extractTargetTable(sqlBlock);
+  const stmTarget = stmRows[0]?.targetTable || '';
+  if (!sqlTarget) {
+    checks.push({
+      name: 'target_table_match',
+      status: 'warning',
+      detail: 'SQL has no CREATE TABLE/VIEW statement; target object cannot be verified.',
+    });
+  } else if (!stmTarget) {
+    checks.push({
+      name: 'target_table_match',
+      status: 'warning',
+      detail: 'STM rows did not declare a target table.',
+    });
+  } else if (tablesMatch(sqlTarget, stmTarget)) {
+    checks.push({
+      name: 'target_table_match',
+      status: 'pass',
+      detail: `SQL target ${sqlTarget} matches STM target ${stmTarget}.`,
+    });
+  } else {
+    checks.push({
+      name: 'target_table_match',
+      status: 'fail',
+      detail: `SQL target ${sqlTarget} does not match STM target ${stmTarget}.`,
+    });
+  }
+
+  // Check 4 — output schema vs STM target columns/types (from BQ dry-run)
+  const schema = parseDryRunOutputSchema(lastDryRunResultText);
+  if (!schema) {
+    checks.push({
+      name: 'output_schema_vs_stm',
+      status: 'not_run',
+      detail: 'BigQuery dry-run response did not expose the output schema (MCP wrapping); type-level check skipped.',
+    });
+  } else {
+    const stmByName = new Map(stmRows.map((r) => [r.targetColumn.toLowerCase(), r]));
+    const schemaByName = new Map(schema.map((f) => [f.name.toLowerCase(), f]));
+    const schemaNames = new Set(schemaByName.keys());
+    const stmNames = new Set(stmByName.keys());
+    const missingFromSchema = [...stmNames].filter((n) => !schemaNames.has(n));
+    const extraInSchema = [...schemaNames].filter((n) => !stmNames.has(n));
+    const typeMismatches = [];
+    for (const [name, field] of schemaByName) {
+      const stmRow = stmByName.get(name);
+      if (!stmRow || !stmRow.targetType) continue;
+      const sqlType = canonicalBqType(field.type);
+      const stmType = canonicalBqType(stmRow.targetType);
+      if (sqlType !== stmType) {
+        typeMismatches.push(`${name}: SQL=${sqlType}, STM=${stmType}`);
+      }
+    }
+    const schemaIssues = [];
+    if (missingFromSchema.length) schemaIssues.push(`Declared in STM but missing from SQL output: ${missingFromSchema.join(', ')}.`);
+    if (extraInSchema.length) schemaIssues.push(`Produced by SQL but not in STM: ${extraInSchema.join(', ')}.`);
+    if (typeMismatches.length) schemaIssues.push(`Type mismatch — ${typeMismatches.join('; ')}.`);
+
+    checks.push({
+      name: 'output_schema_vs_stm',
+      status: schemaIssues.length === 0 ? 'pass' : 'fail',
+      detail: schemaIssues.length === 0
+        ? `BigQuery dry-run output schema matches STM (${schema.length} columns).`
+        : schemaIssues.join(' '),
+    });
+  }
+
+  const anyFail = checks.some((c) => c.status === 'fail');
+  const anyWarning = checks.some((c) => c.status === 'warning' || c.status === 'not_run');
+  const status = anyFail ? 'fail' : anyWarning ? 'warning' : 'pass';
+  const summary = anyFail
+    ? 'SQL does not structurally match the STM. See check details.'
+    : anyWarning
+      ? 'SQL aligns with the STM for verifiable checks; some checks could not be run.'
+      : 'SQL structurally matches the STM on all checks.';
+
+  return { status, summary, checks };
 }
 
 function extractValidationSummary(content, request = {}) {
@@ -1538,7 +1910,13 @@ function killChildProcess(proc) {
 
 // ── Claude CLI Spawner ────────────────────────────────────────
 
-async function runClaude(prompt, sessionId, request, onEvent) {
+async function runClaude(prompt, sessionId, request, onEvent, ctx = {}, retryCount = 0) {
+  const log = ctx.log || rootLogger.child({ sessionId, component: 'claude-session' });
+  const requestId = ctx.requestId || null;
+  // AbortSignal from the HTTP handler. Fires when the client disconnects so
+  // we can kill the spawned Claude tree promptly instead of letting it run
+  // to the wall-clock timeout while no one is listening.
+  const abortSignal = ctx.abortSignal || null;
   const claudeBin = findClaude();
   if (!claudeBin) {
     throw new Error(
@@ -1552,7 +1930,9 @@ async function runClaude(prompt, sessionId, request, onEvent) {
   }
 
   activeRequests++;
-  console.log(`  [claude] Spawning for session ${sessionId.slice(0, 8)} (active: ${activeRequests}/${MAX_CONCURRENT})`);
+  log.info('Spawning Claude session', { activeRequests, maxConcurrent: MAX_CONCURRENT });
+  metrics.incr('claude_sessions_spawned', { kind: retryCount > 0 ? 'retry' : 'primary' });
+  metrics.setGauge('claude_sessions_active', {}, activeRequests);
 
   let proc = null;
   let timeoutId = null;
@@ -1572,15 +1952,29 @@ async function runClaude(prompt, sessionId, request, onEvent) {
   const pendingToolCalls = new Map();
   // Jira-ordering tracking: has a successful BigQuery dry-run completed yet?
   const orderingState = { dryRunPassed: false, jiraCommentBeforeDryRun: false };
+  // Bridge-owned gate verdict source: every BigQuery dry-run/execute MCP call
+  // that completes is captured here from the raw tool_result. The verdict is
+  // derived from the LAST attempt's is_error flag — Claude's prose verdict
+  // (validation.sqlChecks.status) is discarded. This is the only path that
+  // guarantees the gate decision is free of LLM interpretation bias while
+  // remaining inside the MCP-only constraint.
+  const dryRunAttempts = [];
 
+  // Forward-declared so cleanup() can detach the listener; assigned later.
+  let abortHandlerRef = null;
   const cleanup = () => {
     if (hasCleanedUp) return;
     hasCleanedUp = true;
     clearTimeout(timeoutId);
     activeRequests--;
+    metrics.setGauge('claude_sessions_active', {}, activeRequests);
     if (proc) {
       spawnedProcs.delete(proc);
       killChildProcess(proc);
+    }
+    if (abortSignal && abortHandlerRef) {
+      try { abortSignal.removeEventListener('abort', abortHandlerRef); } catch { /* ignore */ }
+      abortHandlerRef = null;
     }
   };
 
@@ -1588,6 +1982,24 @@ async function runClaude(prompt, sessionId, request, onEvent) {
   const session = getSession(sessionId);
 
   return new Promise((resolve, reject) => {
+    // If the HTTP client disconnects, kill the Claude tree immediately and
+    // reject so the outer handler can stop emitting SSE writes.
+    if (abortSignal) {
+      if (abortSignal.aborted) {
+        cleanup();
+        metrics.incr('claude_sessions_aborted', { reason: 'pre_aborted' });
+        return reject(new Error('Request aborted by client before Claude session started'));
+      }
+      abortHandlerRef = () => {
+        if (hasCleanedUp) return;
+        log.warn('Client disconnected — killing Claude tree');
+        metrics.incr('claude_sessions_aborted', { reason: 'client_disconnect' });
+        cleanup();
+        reject(new Error('Request aborted by client'));
+      };
+      abortSignal.addEventListener('abort', abortHandlerRef, { once: true });
+    }
+
     const args = [
       '-p',
       '-',
@@ -1624,10 +2036,46 @@ async function runClaude(prompt, sessionId, request, onEvent) {
     }, CLAUDE_TIMEOUT_MS);
 
     let buffer = '';
+    let bufferAborted = false;
     const claudeStartMs = Date.now();
 
+    // Bounded-buffer guard: a pathological Claude response (e.g. an MCP tool
+    // that returns megabytes of payload) could exhaust memory if any of the
+    // three accumulators grows without bound. We enforce the cap from config
+    // and abort the run if any accumulator exceeds it.
+    const enforceBufferLimit = (which, currentBytes) => {
+      if (bufferAborted) return true;
+      if (currentBytes > MAX_STREAM_BUFFER_BYTES) {
+        bufferAborted = true;
+        log.error('Stream buffer exceeded limit — aborting session', {
+          accumulator: which,
+          bytes: currentBytes,
+          limit: MAX_STREAM_BUFFER_BYTES,
+        });
+        metrics.incr('stream_buffer_overflow', { accumulator: which });
+        onEvent({
+          type: 'activity_event',
+          event: makeActivityEvent({
+            stage: 'validation',
+            type: 'error',
+            status: 'failed',
+            title: 'Stream Buffer Overflow',
+            summary: `Claude response exceeded the ${MAX_STREAM_BUFFER_BYTES}-byte buffer limit on ${which}. Session aborted to protect the bridge.`,
+            details: ['Raise SQL_CURATOR_MAX_STREAM_BUFFER_BYTES if this is expected for your workload.'],
+            source: 'bridge',
+          }),
+        });
+        cleanup();
+        reject(new Error(`Stream buffer overflow on ${which} (>${MAX_STREAM_BUFFER_BYTES} bytes)`));
+        return true;
+      }
+      return false;
+    };
+
     proc.stdout.on('data', (chunk) => {
+      if (bufferAborted) return;
       buffer += chunk.toString('utf-8');
+      if (enforceBufferLimit('line_buffer', Buffer.byteLength(buffer, 'utf8'))) return;
       const lines = buffer.split('\n');
       buffer = lines.pop() || ''; // Keep incomplete line in buffer
 
@@ -1645,6 +2093,7 @@ async function runClaude(prompt, sessionId, request, onEvent) {
           toolCalls,
           pendingToolCalls,
           orderingState,
+          dryRunAttempts,
         });
         if (result?.delta) {
           // Emit message_start once before the first streaming chunk
@@ -1654,6 +2103,7 @@ async function runClaude(prompt, sessionId, request, onEvent) {
           }
           onEvent({ type: 'message_delta', content: result.delta });
           accumulatedDeltas += result.delta;
+          if (enforceBufferLimit('accumulated_deltas', Buffer.byteLength(accumulatedDeltas, 'utf8'))) return;
           activityScanOffsetDeltas = processInlineActivities(
             accumulatedDeltas,
             activityScanOffsetDeltas,
@@ -1666,6 +2116,7 @@ async function runClaude(prompt, sessionId, request, onEvent) {
           fullMessageText = fullMessageText
             ? fullMessageText + '\n\n' + result.fullText
             : result.fullText;
+          if (enforceBufferLimit('full_message_text', Buffer.byteLength(fullMessageText, 'utf8'))) return;
           activityScanOffsetFull = processInlineActivities(
             fullMessageText,
             activityScanOffsetFull,
@@ -1682,7 +2133,7 @@ async function runClaude(prompt, sessionId, request, onEvent) {
     proc.stderr.on('data', (chunk) => {
       // Log stderr but don't expose to client
       const text = chunk.toString('utf-8').trim();
-      if (text) console.error(`  [claude stderr] ${text}`);
+      if (text) log.warn('Claude stderr', { text });
     });
 
     // Write prompt to stdin and close
@@ -1697,7 +2148,7 @@ async function runClaude(prompt, sessionId, request, onEvent) {
 
     proc.on('close', async (code) => {
       cleanup();
-      console.log(`  [claude] Exited with code ${code} for session ${sessionId.slice(0, 8)}`);
+      log.info('Claude session exited', { exitCode: code });
 
       // Prefer the authoritative full-message text; fall back to accumulated streaming deltas
       const finalText = fullMessageText || accumulatedDeltas;
@@ -1715,23 +2166,150 @@ async function runClaude(prompt, sessionId, request, onEvent) {
         onEvent({ type: 'message', content: stripInlineActivities(finalText) });
       }
 
-      // ── Strict validation gate ──────────────────────────────
-      // Refuse to surface [SQL_READY] unless Claude's structured
-      // validation.sqlChecks.status is exactly 'pass'. This enforces the
-      // SKILL S11 dry-run + auto-fix contract at the bridge level: a run
-      // that returned SQL but did not validate is treated as a failed run.
+      const isGithubDeploy = request.taskType === 'github_deploy';
+
+      // ── Layered validation gate ─────────────────────────────
+      // The gate is a conjunction of three layers; SQL surfaces only when
+      // ALL pass. The bridge derives every verdict deterministically (L1
+      // from raw tool_result is_error, L2 from mechanical SQL/STM parsing,
+      // L3 from a cold LLM coverage check). Claude's self-reported prose
+      // verdicts are discarded and overwritten in the validation summary.
+      //
+      //   L1 — BigQuery dry-run via MCP (executional correctness)
+      //   L2 — SQL ↔ STM structural alignment (no LLM)
+      //   L3 — STM ↔ requirements coverage (cold LLM, no SQL, no history)
       let validationSummary = null;
       let sqlChecksStatus = 'not_run';
       let gatePassed = false;
       let gateBlockedBy = null;
+      let bridgeVerdict = null;
       if (hasSqlBlock) {
         validationSummary = extractValidationSummary(finalText, request);
-        sqlChecksStatus = validationSummary?.sqlChecks?.status || 'not_run';
+        const stmBlock = (finalText.match(/```stm\s*\n([\s\S]*?)```/i) || [])[1] || null;
+
+        if (!isGithubDeploy && !isClarify) {
+          // ── L1: BigQuery dry-run via MCP ───────────────────
+          const lastAttempt = dryRunAttempts.length > 0 ? dryRunAttempts[dryRunAttempts.length - 1] : null;
+
+          if (!lastAttempt) {
+            bridgeVerdict = {
+              status: 'not_run',
+              summary: 'BigQuery dry-run tool was not invoked during the run. Strict mode requires a dry-run via MCP before SQL surfaces.',
+              checks: [
+                'Expected at least one execute_sql_readonly (or equivalent dry-run) tool call from the main session.',
+                'Claude must invoke the dry-run tool so the bridge can read the authoritative result.',
+              ],
+            };
+          } else if (lastAttempt.isError) {
+            const errSnippet = (lastAttempt.resultText || '').replace(/\s+/g, ' ').trim().slice(0, 1000);
+            bridgeVerdict = {
+              status: 'fail',
+              summary: 'BigQuery dry-run returned an error via MCP.',
+              checks: [
+                `Tool: ${lastAttempt.toolName}`,
+                errSnippet || 'No error text returned.',
+                `Dry-run attempts in this run: ${dryRunAttempts.length}.`,
+              ],
+            };
+          } else {
+            bridgeVerdict = {
+              status: 'pass',
+              summary: 'BigQuery dry-run completed successfully via MCP.',
+              checks: [
+                `Tool: ${lastAttempt.toolName}`,
+                'Tool result reported no error (is_error=false).',
+                `Dry-run attempts in this run: ${dryRunAttempts.length}.`,
+              ],
+            };
+          }
+          if (validationSummary) validationSummary.sqlChecks = bridgeVerdict;
+          sqlChecksStatus = bridgeVerdict.status;
+          metrics.incr('gate_layer_result', { layer: 'L1', status: bridgeVerdict.status });
+
+          onEvent({
+            type: 'activity_event',
+            event: makeActivityEvent({
+              stage: 'validation',
+              type: 'validation',
+              status: bridgeVerdict.status === 'pass' ? 'completed'
+                : bridgeVerdict.status === 'fail' ? 'failed' : 'pending',
+              title: `BigQuery Dry-Run — ${bridgeVerdict.status}`,
+              summary: bridgeVerdict.summary,
+              evidence: bridgeVerdict.checks,
+              source: 'bigquery',
+            }),
+          });
+
+          // ── L2: SQL ↔ STM structural alignment (only when L1 passed) ──
+          let structuralVerdict = null;
+          if (bridgeVerdict.status === 'pass') {
+            structuralVerdict = runStructuralChecks(
+              sqlBlock,
+              stmBlock,
+              lastAttempt?.resultText
+            );
+            if (validationSummary) {
+              validationSummary.stmCompleteness = {
+                status: structuralVerdict.status,
+                summary: structuralVerdict.summary,
+                checks: structuralVerdict.checks.map((c) => `${c.name}: ${c.status} — ${c.detail}`),
+              };
+            }
+            metrics.incr('gate_layer_result', { layer: 'L2', status: structuralVerdict.status });
+            onEvent({
+              type: 'activity_event',
+              event: makeActivityEvent({
+                stage: 'validation',
+                type: 'validation',
+                status: structuralVerdict.status === 'pass' ? 'completed'
+                  : structuralVerdict.status === 'fail' ? 'failed' : 'warning',
+                title: `SQL ↔ STM Structural Check — ${structuralVerdict.status}`,
+                summary: structuralVerdict.summary,
+                evidence: structuralVerdict.checks.map((c) => `${c.name}: ${c.detail}`),
+                source: 'bridge',
+              }),
+            });
+          }
+
+          // ── L3: STM ↔ requirements coverage (only when L1+L2 passed) ──
+          let coverageVerdict = null;
+          if (bridgeVerdict.status === 'pass' && structuralVerdict?.status === 'pass') {
+            coverageVerdict = await runRequirementsCoverageCheck(stmBlock, request, onEvent, { log: log.child({ phase: 'l3-coverage' }) });
+            if (coverageVerdict && validationSummary) {
+              validationSummary.requirementCoverage = {
+                status: coverageVerdict.status,
+                summary: coverageVerdict.summary,
+                checks: coverageVerdict.checks,
+              };
+            }
+            if (coverageVerdict) {
+              metrics.incr('gate_layer_result', { layer: 'L3', status: coverageVerdict.status });
+            }
+          }
+
+          // Composite gate decision: every layer must be pass for SQL to
+          // surface. Any fail/not_run blocks; warnings are allowed through
+          // but flagged in the validation summary the UI shows.
+          const layerStatuses = [
+            { layer: 'L1 dry-run', status: bridgeVerdict.status },
+            { layer: 'L2 structural', status: structuralVerdict?.status || (bridgeVerdict.status === 'pass' ? 'not_run' : 'skipped') },
+            { layer: 'L3 coverage', status: coverageVerdict?.status || (bridgeVerdict.status === 'pass' && structuralVerdict?.status === 'pass' ? 'not_run' : 'skipped') },
+          ];
+          const blockingLayer = layerStatuses.find((l) => l.status === 'fail' || l.status === 'not_run');
+          if (blockingLayer) {
+            sqlChecksStatus = blockingLayer.status;
+            gateBlockedBy = `${blockingLayer.layer}: ${blockingLayer.status}`;
+          } else {
+            sqlChecksStatus = 'pass';
+          }
+        } else {
+          // GitHub deploy or clarification paths bypass all layers.
+          sqlChecksStatus = validationSummary?.sqlChecks?.status || 'not_run';
+        }
+
         if (REQUIRE_SQLCHECKS_PASS) {
           gatePassed = sqlChecksStatus === 'pass';
-          if (!gatePassed) {
-            gateBlockedBy = sqlChecksStatus;
-          }
+          if (!gatePassed && !gateBlockedBy) gateBlockedBy = sqlChecksStatus;
         } else {
           gatePassed = true;
         }
@@ -1761,8 +2339,6 @@ async function runClaude(prompt, sessionId, request, onEvent) {
         onEvent({ type: 'validation_summary', summary: validationSummary });
         onEvent({ type: 'status', stage: 'validation', status: 'completed', message: 'Validated against requirements, mappings, and available schema context.' });
       }
-
-      const isGithubDeploy = request.taskType === 'github_deploy';
 
       // ── Gated rejection: SQL existed but dry-run/validation did not pass ──
       if (hasSqlBlock && !gatePassed && !isClarify && !isGithubDeploy) {
@@ -1814,6 +2390,59 @@ async function runClaude(prompt, sessionId, request, onEvent) {
 
       if (!hasSqlBlock && !isClarify && !isGithubDeploy) {
         const terminalIssue = detectTerminalRunIssue(finalText);
+
+        // ── Auto-retry: request the SQL block explicitly once ──
+        // Only retry for missing_sql (not rate limits), only on the first attempt,
+        // and only when we have a resumable conversation ID.
+        if (terminalIssue.kind === 'missing_sql' && retryCount === 0 && session.conversationId) {
+          log.warn('Auto-retry: no SQL block on first pass, resuming conversation', { conversationId: session.conversationId.slice(0, 12) });
+          metrics.incr('auto_retry_attempts', { reason: 'missing_sql' });
+          onEvent({
+            type: 'activity_event',
+            event: makeActivityEvent({
+              stage: 'validation',
+              type: 'observation',
+              status: 'running',
+              title: 'Auto-Retry: Requesting SQL Block',
+              summary: 'Claude completed the run without a fenced SQL block. Resuming the same conversation to request the SQL artifact explicitly.',
+              source: 'bridge',
+            }),
+          });
+
+          const retryUserMsg = 'Your previous response did not include a fenced ```sql``` code block. Please re-emit the complete generated SQL now inside a properly fenced ```sql\n...\n``` block, followed by the STM and validation blocks if not already present, then end with [SQL_READY].';
+          const retryRequest = {
+            ...request,
+            messages: [
+              ...(request.messages || []),
+              { role: 'assistant', content: finalText },
+              { role: 'user', content: retryUserMsg },
+            ],
+          };
+          const retryPrompt = buildPrompt(retryRequest);
+
+          try {
+            const retryResult = await runClaude(retryPrompt, sessionId, retryRequest, onEvent, ctx, 1);
+            resolve(retryResult);
+          } catch (retryErr) {
+            log.error('Auto-retry failed', { error: retryErr.message });
+            // Fall through: surface the original error below via a re-entrant call
+            // but we must not resolve twice — just log and let the outer error path run.
+            onEvent({
+              type: 'activity_event',
+              event: makeActivityEvent({
+                stage: 'validation',
+                type: 'error',
+                status: 'failed',
+                title: 'Auto-Retry Failed',
+                summary: `Retry attempt also failed: ${retryErr.message}`,
+                source: 'bridge',
+              }),
+            });
+            // Fall through to normal error surface below.
+          }
+          return; // prevent double-resolve; retry path owns the resolve/reject from here
+        }
+
         onEvent({
           type: 'status',
           stage: 'validation',
@@ -1861,7 +2490,7 @@ async function runClaude(prompt, sessionId, request, onEvent) {
               source: 'claude',
             }),
           });
-          console.log(`  [stm] Extracted STM with ${stm.rows.length} rows`);
+          log.info('STM extracted', { rows: stm.rows.length });
         }
       }
 
@@ -1930,6 +2559,245 @@ async function runClaude(prompt, sessionId, request, onEvent) {
     cleanup();
     throw err;
   });
+}
+
+// ── L3: Cold requirements-coverage check ─────────────────────
+// Spawns a fresh Claude session given ONLY the raw requirement text and the
+// STM JSON. No SQL, no chat history, no MCP tools. Asks the narrow question:
+// does the STM cover every acceptance criterion in the requirements?
+//
+// This is the irreducibly interpretive layer — there is no deterministic way
+// to check "does the STM capture intent". The cold session minimises bias by
+// having no generation history and no SQL to anchor on.
+//
+// Returns: { status, summary, checks[] } or null on timeout/parse failure.
+
+const L3_TIMEOUT_MS = CONFIG.timeouts.l3CoverageMs;
+const L3_ENABLED = CONFIG.features.l3CoverageCheckEnabled;
+
+function buildRequirementsText(request) {
+  const parts = [];
+  if (request?.jiraInput?.project && request?.jiraInput?.storyNumber) {
+    parts.push(`Jira reference: ${request.jiraInput.project}-${request.jiraInput.storyNumber}`);
+  }
+  // The main session prompt already echoed the Jira description into chat
+  // history; the bridge does not re-fetch Jira here to keep this purely text.
+  if (request?.contextText && request.contextText.trim()) {
+    parts.push('Free-text requirements:\n' + request.contextText.trim());
+  }
+  if (Array.isArray(request?.uploadedFiles)) {
+    for (const f of request.uploadedFiles) {
+      if (f?.content && typeof f.content === 'string') {
+        parts.push(`Uploaded file (${f.name || 'unnamed'}):\n${f.content.slice(0, 8000)}`);
+      }
+    }
+  }
+  // Include the most recent user message as the canonical ask.
+  if (Array.isArray(request?.messages)) {
+    const lastUser = [...request.messages].reverse().find((m) => m?.role === 'user');
+    if (lastUser?.content) {
+      parts.push('User request:\n' + String(lastUser.content).slice(0, 8000));
+    }
+  }
+  return parts.join('\n\n').trim();
+}
+
+async function runRequirementsCoverageCheck(stmBlock, request, onEvent, ctx = {}) {
+  const log = ctx.log || rootLogger.child({ component: 'l3-coverage' });
+  if (!L3_ENABLED) return null;
+  if (!stmBlock) return null;
+
+  const requirementsText = buildRequirementsText(request);
+  if (!requirementsText) {
+    // Nothing to validate against. Honest non-result.
+    return {
+      status: 'not_run',
+      summary: 'No textual requirements were provided (no Jira description, free text, or uploaded files); STM ↔ requirements coverage could not be assessed.',
+      checks: ['Provide a Jira story, free text, or uploaded file content to enable this layer.'],
+    };
+  }
+
+  const claudeBin = findClaude();
+  if (!claudeBin) return null;
+
+  const prompt = [
+    'You are an independent requirements analyst. You have no knowledge of any SQL or schema.',
+    'Your only job: judge whether the STM (Source-to-Target Map) below covers every acceptance criterion in the requirements.',
+    '',
+    '── REQUIREMENTS ─────────────────────────────────────────',
+    requirementsText,
+    '',
+    '── STM JSON ─────────────────────────────────────────────',
+    '```json',
+    stmBlock,
+    '```',
+    '',
+    '── YOUR TASK ───────────────────────────────────────────',
+    '1. Identify each distinct acceptance criterion or business rule in the requirements (filters, joins, grain, aggregations, ranking, date logic, output columns).',
+    '2. For each criterion, decide whether the STM has at least one row that addresses it (via transformation, businessRule, target column, or source field).',
+    '3. Be strict but fair — do not invent criteria the user did not state, and do not flag STM rows just because they look unrelated to one criterion (they may serve another).',
+    '4. Return ONLY a fenced ```coverage``` JSON block. No other prose.',
+    '',
+    'Required JSON shape:',
+    '```',
+    '{"status":"pass"|"warning"|"fail","summary":"one sentence","criteria":[{"text":"...","covered":true|false|"partial","evidenceStmRow":"sourceField→targetColumn or N/A"}]}',
+    '```',
+    '',
+    'Status rules — apply strictly:',
+    '- "pass"    : every criterion is covered=true',
+    '- "warning" : at least one is covered="partial", none are covered=false',
+    '- "fail"    : at least one criterion is covered=false',
+  ].join('\n');
+
+  onEvent({
+    type: 'activity_event',
+    event: makeActivityEvent({
+      stage: 'validation',
+      type: 'validation',
+      status: 'running',
+      title: 'Requirements Coverage — Cold Review',
+      summary: 'A fresh Claude session (no SQL, no chat history, no tools) is checking whether the STM covers every acceptance criterion in the requirements.',
+      source: 'bridge',
+    }),
+  });
+
+  const result = await new Promise((resolve) => {
+    const proc = spawn(claudeBin, [
+      '-p', '-',
+      '--output-format', 'stream-json',
+      '--max-turns', '2',
+      '--verbose',
+      '--dangerously-skip-permissions',
+    ], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: buildClaudeEnv(),
+    });
+    spawnedProcs.add(proc);
+
+    let buffer = '';
+    let fullText = '';
+    let accDelta = '';
+
+    const timer = setTimeout(() => {
+      log.warn('L3 cold session timed out', { timeoutMs: L3_TIMEOUT_MS });
+      metrics.incr('l3_coverage_outcome', { result: 'timeout' });
+      killChildProcess(proc);
+      spawnedProcs.delete(proc);
+      resolve(null);
+    }, L3_TIMEOUT_MS);
+
+    proc.stdout.on('data', (chunk) => {
+      buffer += chunk.toString('utf-8');
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const parsed = JSON.parse(line);
+          if (parsed.type === 'assistant' && Array.isArray(parsed.message?.content)) {
+            for (const block of parsed.message.content) {
+              if (block.type === 'text') fullText += block.text || '';
+            }
+          }
+          if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
+            accDelta += parsed.delta.text;
+          }
+        } catch { /* skip */ }
+      }
+    });
+
+    proc.stderr.on('data', (chunk) => {
+      const text = chunk.toString('utf-8').trim();
+      if (text) log.warn('L3 stderr', { text });
+    });
+
+    proc.stdin.write(prompt, (err) => {
+      if (err) {
+        clearTimeout(timer);
+        killChildProcess(proc);
+        spawnedProcs.delete(proc);
+        resolve(null);
+        return;
+      }
+      proc.stdin.end();
+    });
+
+    proc.on('close', () => {
+      clearTimeout(timer);
+      spawnedProcs.delete(proc);
+      const output = fullText || accDelta;
+      const m = output.match(/```coverage\s*\n([\s\S]*?)```/i);
+      if (!m) {
+        log.warn('L3 returned no coverage block');
+        metrics.incr('l3_coverage_outcome', { result: 'no_block' });
+        resolve(null);
+        return;
+      }
+      try {
+        const parsed = JSON.parse(m[1].trim());
+        resolve(parsed);
+      } catch (parseErr) {
+        log.warn('L3 JSON parse error', { error: parseErr.message });
+        metrics.incr('l3_coverage_outcome', { result: 'parse_error' });
+        resolve(null);
+      }
+    });
+
+    proc.on('error', () => {
+      clearTimeout(timer);
+      spawnedProcs.delete(proc);
+      resolve(null);
+    });
+  });
+
+  if (!result || typeof result !== 'object' || !result.status) {
+    onEvent({
+      type: 'activity_event',
+      event: makeActivityEvent({
+        stage: 'validation',
+        type: 'error',
+        status: 'warning',
+        title: 'Requirements Coverage — No Result',
+        summary: 'The cold coverage session timed out or returned an unparsable result. Treating coverage as not_run.',
+        source: 'bridge',
+      }),
+    });
+    return {
+      status: 'not_run',
+      summary: 'Requirements coverage check did not return a structured verdict.',
+      checks: ['Cold L3 session timed out or returned malformed JSON.'],
+    };
+  }
+
+  const status = normalizeValidationStatus(result.status);
+  const criteria = Array.isArray(result.criteria) ? result.criteria : [];
+  const missing = criteria.filter((c) => c.covered === false).map((c) => c.text);
+  const partial = criteria.filter((c) => c.covered === 'partial' || c.covered === 'warning').map((c) => c.text);
+  const checks = [
+    `Criteria identified: ${criteria.length}.`,
+    `Fully covered: ${criteria.filter((c) => c.covered === true).length}.`,
+    partial.length ? `Partially covered: ${partial.length} — ${partial.slice(0, 5).join('; ')}.` : null,
+    missing.length ? `Missing coverage: ${missing.slice(0, 5).join('; ')}.` : null,
+  ].filter(Boolean);
+
+  onEvent({
+    type: 'activity_event',
+    event: makeActivityEvent({
+      stage: 'validation',
+      type: 'validation',
+      status: status === 'pass' ? 'completed' : status === 'fail' ? 'failed' : 'warning',
+      title: `Requirements Coverage — ${status}`,
+      summary: result.summary || `Cold review of STM ↔ requirements: ${status}.`,
+      evidence: checks,
+      source: 'bridge',
+    }),
+  });
+
+  return {
+    status,
+    summary: result.summary || 'Requirements coverage assessed by cold review.',
+    checks,
+  };
 }
 
 // ── Two-pass Jira completion ──────────────────────────────────
@@ -2118,7 +2986,7 @@ Hard constraints:
 // Reference: https://docs.anthropic.com/en/docs/claude-code/cli-reference
 
 function parseClaudeLine(line, onEvent, ctx) {
-  const { toolCalls, pendingToolCalls, orderingState } = ctx;
+  const { toolCalls, pendingToolCalls, orderingState, dryRunAttempts } = ctx;
   let parsed;
   try {
     parsed = JSON.parse(line);
@@ -2210,8 +3078,26 @@ function parseClaudeLine(line, onEvent, ctx) {
 
       // Mark dry-run pass for ordering detector.
       const lowerName = String(toolName).toLowerCase();
-      if (!isError && (lowerName.includes('execute_sql') || lowerName.includes('dry_run') || lowerName.includes('dryrun'))) {
+      const isDryRunTool = lowerName.includes('execute_sql') || lowerName.includes('dry_run') || lowerName.includes('dryrun');
+      if (!isError && isDryRunTool) {
         orderingState.dryRunPassed = true;
+      }
+
+      // Capture every dry-run attempt so the bridge can derive the gate
+      // verdict from the raw tool_result. The LAST attempt is treated as the
+      // verdict source (auto-fix retries on the same SQL converge to the
+      // final version). Claude's self-reported sqlChecks.status is discarded
+      // in favor of this deterministic signal.
+      if (isDryRunTool && dryRunAttempts) {
+        const sqlFromInput =
+          (toolInput && typeof toolInput === 'object' && (toolInput.query || toolInput.sql || toolInput.statement)) || null;
+        dryRunAttempts.push({
+          toolName,
+          sql: typeof sqlFromInput === 'string' ? sqlFromInput : null,
+          isError,
+          resultText: typeof content === 'string' ? content : String(content || ''),
+          timestamp: Date.now(),
+        });
       }
 
       const finding = semanticFindingFromToolPair(toolName, toolInput, content, isError);
@@ -2276,20 +3162,64 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ── GET /health ─────────────────────────────────────────
+  // Reports a layered health status:
+  //   ready                  — claude CLI present and bridge has capacity
+  //   claude_not_found       — bridge is up but claude CLI is missing on PATH
+  //   degraded_capacity      — at the concurrency ceiling; new requests will 503
+  //   recent_errors          — last error within the past 60s (informational)
   if (req.method === 'GET' && req.url === '/health') {
     const claudeBin = findClaude();
+    const atCeiling = activeRequests >= MAX_CONCURRENT;
+    const recentlyErrored = bridgeState.lastErrorAt && (Date.now() - bridgeState.lastErrorAt) < 60_000;
+    let status;
+    if (!claudeBin) status = 'claude_not_found';
+    else if (atCeiling) status = 'degraded_capacity';
+    else if (recentlyErrored) status = 'recent_errors';
+    else status = 'ready';
+
+    res.writeHead(claudeBin ? 200 : 503, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      status,
+      claude: {
+        binPath: claudeBin || null,
+        detected: !!claudeBin,
+      },
+      capacity: {
+        activeRequests,
+        maxConcurrent: MAX_CONCURRENT,
+        queueDepth: Math.max(0, activeRequests - MAX_CONCURRENT),
+        atCeiling,
+      },
+      sessions: {
+        active: sessions.size,
+      },
+      features: {
+        offlineDryRunEnabled: OFFLINE_DRY_RUN_ENABLED,
+        requireSqlChecksPass: REQUIRE_SQLCHECKS_PASS,
+        jiraCompletionEnabled: JIRA_COMPLETION_ENABLED,
+        l3CoverageCheckEnabled: L3_ENABLED,
+      },
+      lastError: bridgeState.lastErrorAt ? {
+        atIso: new Date(bridgeState.lastErrorAt).toISOString(),
+        ageMs: Date.now() - bridgeState.lastErrorAt,
+        message: bridgeState.lastErrorMessage,
+      } : null,
+      port: PORT,
+      uptimeSec: Math.floor((Date.now() - bridgeState.startedAt) / 1000),
+      mode: 'claude_cli',
+    }));
+    return;
+  }
+
+  // ── GET /metrics ────────────────────────────────────────
+  // JSON snapshot of counters, gauges, and bucketed histograms collected by
+  // metrics.js. Operators / dashboards can poll this; transform to Prometheus
+  // exposition format downstream if needed.
+  if (req.method === 'GET' && req.url === '/metrics') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
-      status: claudeBin ? 'ready' : 'claude_not_found',
-      claude: claudeBin || 'not found',
-      activeRequests,
-      maxConcurrent: MAX_CONCURRENT,
-      activeSessions: sessions.size,
-      offlineDryRunEnabled: OFFLINE_DRY_RUN_ENABLED,
-      requireSqlChecksPass: REQUIRE_SQLCHECKS_PASS,
-      port: PORT,
-      uptime: Math.floor(process.uptime()),
-      mode: 'claude_cli',
+      uptimeSec: Math.floor((Date.now() - bridgeState.startedAt) / 1000),
+      snapshot: metrics.snapshot(),
     }));
     return;
   }
@@ -2320,11 +3250,10 @@ const server = http.createServer(async (req, res) => {
       body += chunk;
       if (Buffer.byteLength(body, 'utf8') > MAX_REQUEST_BODY_BYTES) {
         bodyTooLarge = true;
-        res.writeHead(413, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          error: 'Request body is too large',
-          hint: `Reduce uploaded/context content or raise SQL_CURATOR_MAX_REQUEST_BODY_BYTES above ${MAX_REQUEST_BODY_BYTES}.`,
-        }));
+        sendError(res, 413, 'BODY_TOO_LARGE', 'Request body exceeds the configured maximum', {
+          maxBytes: MAX_REQUEST_BODY_BYTES,
+          hint: 'Reduce uploaded/context content or raise SQL_CURATOR_MAX_REQUEST_BODY_BYTES.',
+        });
         req.destroy();
       }
     });
@@ -2332,82 +3261,107 @@ const server = http.createServer(async (req, res) => {
     req.on('end', async () => {
       if (bodyTooLarge) return;
 
-      let request;
+      let rawBody;
       try {
-        request = JSON.parse(body);
+        rawBody = JSON.parse(body);
       } catch {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Invalid JSON body' }));
+        sendError(res, 400, 'INVALID_JSON', 'Request body is not valid JSON');
         return;
       }
 
-      const { sessionId, messages, taskType, bqProjectId, bqDatasetId, dryRun } = request;
-
-      if (!messages || !Array.isArray(messages) || messages.length === 0) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'messages array is required' }));
+      const validation = validateChatBody(rawBody);
+      if (!validation.ok) {
+        sendError(res, 400, validation.code, validation.message, { field: validation.field });
         return;
       }
+      // From here on we use the normalised, type-safe payload.
+      const request = validation.value;
+      const { sessionId, taskType, bqProjectId, bqDatasetId } = request;
 
-      if (!sessionId || typeof sessionId !== 'string') {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'sessionId is required' }));
-        return;
-      }
-
-      if (!taskType || typeof taskType !== 'string') {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'taskType is required' }));
-        return;
-      }
-
-      const allowedTaskTypes = new Set(['auto_detect', 'sql_generation', 'legacy_sql_conversion', 'github_deploy']);
-      if (!allowedTaskTypes.has(taskType)) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Unsupported taskType' }));
-        return;
-      }
-
-      const targetScopeError = validateTargetScope(bqProjectId, bqDatasetId);
-      if (targetScopeError) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: targetScopeError }));
-        return;
-      }
-
-      const requestedOfflineDryRun = dryRun === true || dryRun === 'true';
-      if (requestedOfflineDryRun && !OFFLINE_DRY_RUN_ENABLED) {
-        res.writeHead(403, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          error: 'Offline dry run is disabled',
+      const isOfflineDryRun = request.dryRun && OFFLINE_DRY_RUN_ENABLED;
+      if (request.dryRun && !OFFLINE_DRY_RUN_ENABLED) {
+        sendError(res, 403, 'OFFLINE_DRY_RUN_DISABLED', 'Offline dry run is disabled', {
           hint: 'Set SQL_CURATOR_ENABLE_OFFLINE_DRY_RUN=true only for local UI validation without Claude Code.',
-        }));
+        });
         return;
       }
-      const isOfflineDryRun = requestedOfflineDryRun && OFFLINE_DRY_RUN_ENABLED;
 
       if (!isOfflineDryRun && !findClaude()) {
-        res.writeHead(503, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          error: 'Claude CLI not found',
+        sendError(res, 503, 'CLAUDE_CLI_NOT_FOUND', 'Claude CLI not found on PATH', {
           hint: 'Install with: npm install -g @anthropic-ai/claude-code',
-          docs: 'https://docs.anthropic.com/en/docs/claude-code/overview',
-        }));
+        });
         return;
       }
+
+      // ── Idempotency check ────────────────────────────────
+      // If the client supplied an Idempotency-Key, reject duplicates within
+      // the TTL window so a refresh / double-click / network retry never
+      // spawns a duplicate Claude session.
+      const idempotencyKeyRaw = req.headers['idempotency-key'];
+      const idempotencyKey = typeof idempotencyKeyRaw === 'string' ? idempotencyKeyRaw.trim() : '';
+      if (idempotencyKey) {
+        if (!IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey)) {
+          sendError(res, 400, 'IDEMPOTENCY_KEY_FORMAT', 'Idempotency-Key must be 8–128 characters of [A-Za-z0-9_-]', {
+            field: 'Idempotency-Key',
+          });
+          return;
+        }
+        const existing = idempotency.get(idempotencyKey);
+        if (existing) {
+          metrics.incr('idempotency_collision', { state: existing.state });
+          if (existing.state === 'in_flight') {
+            sendError(res, 409, 'REQUEST_IN_FLIGHT', 'A request with this Idempotency-Key is still in flight', {
+              originalRequestId: existing.requestId,
+              hint: 'Wait for the in-flight request to complete or use a new Idempotency-Key.',
+            });
+            return;
+          }
+          // Completed within TTL — refuse rather than re-bill the user.
+          sendError(res, 409, 'REQUEST_ALREADY_COMPLETED', 'A request with this Idempotency-Key already completed', {
+            originalRequestId: existing.requestId,
+            completedAtIso: new Date(existing.completedAt).toISOString(),
+            succeeded: existing.succeeded,
+            hint: 'Use a fresh Idempotency-Key for a new run.',
+          });
+          return;
+        }
+      }
+
+      const requestId = newRequestId();
+      const requestLog = createLogger({ requestId, sessionId, component: 'request' });
+      metrics.incr('requests_total', { endpoint: '/chat', taskType });
+      const requestStartMs = Date.now();
+
+      // Mark in-flight before we open the SSE stream so a duplicate hit
+      // racing in milliseconds is properly rejected.
+      if (idempotencyKey) {
+        idempotency.set(idempotencyKey, { state: 'in_flight', requestId, completedAt: 0, succeeded: false });
+      }
+
+      // Client-disconnect abort. The SSE response closes when the browser
+      // navigates away or the tab is closed. We propagate the abort into the
+      // Claude session so the child process tree is killed promptly rather
+      // than running to its wall-clock timeout while no one is listening.
+      const clientAbort = new AbortController();
+      let clientDisconnected = false;
+      req.on('close', () => {
+        if (!clientDisconnected) {
+          clientDisconnected = true;
+          requestLog.warn('Client disconnected mid-stream');
+          metrics.incr('requests_client_disconnect', { endpoint: '/chat' });
+          clientAbort.abort();
+        }
+      });
 
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache, no-transform',
         Connection: 'keep-alive',
         'X-Accel-Buffering': 'no',
+        'X-Request-Id': requestId,
       });
       if (res.socket) res.socket.setNoDelay(true);
-
-      // Bench timer to confirm whether events leave the bridge progressively
-      // or get batched at the end. Look at the bridge terminal output: each
-      // line prints the ms since this request started.
-      const requestStartMs = Date.now();
+      requestLog.info('Request accepted', { taskType, projectId: bqProjectId, datasetId: bqDatasetId });
       const sseSend = (event, data) => {
         try {
           // Single write — some Node versions can hold sub-chunk writes in the
@@ -2517,7 +3471,7 @@ const server = http.createServer(async (req, res) => {
 
         const result = isOfflineDryRun
           ? runOfflineDryRun(request, trackingHandler)
-          : await runClaude(prompt, sessionId, request, trackingHandler).finally(() => {
+          : await runClaude(prompt, sessionId, request, trackingHandler, { requestId, log: requestLog, abortSignal: clientAbort.signal }).finally(() => {
               clearInterval(heartbeatInterval);
             });
 
@@ -2525,10 +3479,25 @@ const server = http.createServer(async (req, res) => {
           clearInterval(heartbeatInterval);
         }
 
-        console.log(`  [bridge] Session ${sessionId.slice(0, 8)}: ${result.success ? 'success' : 'completed'}${result.clarification ? ' (needs clarification)' : ''}`);
+        const durationMs = Date.now() - requestStartMs;
+        metrics.observe('request_duration_ms', { endpoint: '/chat' }, durationMs);
+        metrics.incr(result.success ? 'requests_succeeded' : 'requests_completed_with_issue', { endpoint: '/chat' });
+        requestLog.info('Request completed', {
+          success: result.success,
+          clarification: !!result.clarification,
+          durationMs,
+        });
+        if (idempotencyKey) {
+          idempotency.set(idempotencyKey, { state: 'completed', requestId, completedAt: Date.now(), succeeded: !!result.success });
+        }
       } catch (err) {
         const message = err.message || 'Unknown error';
-        console.error(`  [bridge] Error for session ${sessionId.slice(0, 8)}:`, message);
+        metrics.incr('requests_failed', { endpoint: '/chat' });
+        recordError(message);
+        requestLog.error('Request failed', { error: message });
+        if (idempotencyKey) {
+          idempotency.set(idempotencyKey, { state: 'completed', requestId, completedAt: Date.now(), succeeded: false });
+        }
 
         sseSend('status', { stage: 'idle', message: 'Error occurred', timestamp: Date.now() });
         sseSend('activity_event', {
@@ -2542,8 +3511,14 @@ const server = http.createServer(async (req, res) => {
           }),
           timestamp: Date.now(),
         });
-        sseSend('error', { message, timestamp: Date.now() });
-        sseSend('done', { success: false, timestamp: Date.now() });
+        // Structured error response: code, message, requestId — no stack.
+        sseSend('error', {
+          code: 'BRIDGE_ERROR',
+          message,
+          requestId,
+          timestamp: Date.now(),
+        });
+        sseSend('done', { success: false, requestId, timestamp: Date.now() });
       }
 
       res.end();
@@ -2552,11 +3527,9 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  res.writeHead(404, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({
-    error: 'Not found',
-    endpoints: ['POST /chat', 'GET /health', 'DELETE /session/:id'],
-  }));
+  sendError(res, 404, 'NOT_FOUND', 'No handler for this method and path', {
+    endpoints: ['POST /chat', 'GET /health', 'GET /metrics', 'DELETE /session/:id'],
+  });
 });
 
 // ── Start Server ──────────────────────────────────────────────
@@ -2592,41 +3565,80 @@ server.listen(PORT, '127.0.0.1', () => {
   }
 });
 
-// ── Graceful Shutdown ─────────────────────────────────────────
+// ── Graceful Shutdown + Orphan Reaping ────────────────────────
+// Production failure modes we defend against:
+//   • SIGTERM / SIGINT  → drain server, kill child processes, exit clean.
+//   • uncaughtException → log fatal, kill children, exit non-zero so the
+//                         supervisor (systemd/k8s/docker) restarts cleanly.
+//   • node 'exit' event → final synchronous sweep of any lingering children
+//                         (covers paths that bypass the signal handlers).
+//
+// killChildProcess uses taskkill /T on Windows and SIGTERM → SIGKILL on POSIX,
+// which kills the whole MCP server subtree, not just the claude CLI itself.
 
-function gracefulShutdown(signal) {
-  console.log(`\n  Bridge shutting down (${signal})...`);
-
-  // Kill all tracked Claude CLI child processes (and their MCP subtrees) to
-  // prevent orphans. Uses the platform-aware kill helper.
+let shuttingDown = false;
+function reapAllChildren(reason) {
+  let killed = 0;
   for (const proc of spawnedProcs) {
-    killChildProcess(proc);
+    try {
+      killChildProcess(proc);
+      killed++;
+    } catch (err) {
+      // Best effort — some may already be dead.
+      rootLogger.warn('Reap failed for child', { pid: proc?.pid, error: err?.message });
+    }
   }
   spawnedProcs.clear();
+  if (killed > 0) {
+    rootLogger.info('Reaped child processes', { reason, count: killed });
+  }
+  return killed;
+}
 
+function gracefulShutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  rootLogger.info('Bridge shutting down', { signal });
+  reapAllChildren(signal);
   server.close(() => {
-    console.log('  Bridge stopped.');
+    rootLogger.info('Bridge stopped cleanly');
     process.exit(0);
   });
   setTimeout(() => {
-    console.error('  Forced shutdown after 5s timeout');
+    rootLogger.error('Forced shutdown after 5s timeout');
     process.exit(1);
-  }, 5000);
+  }, 5000).unref();
 }
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGHUP', () => gracefulShutdown('SIGHUP'));
+
+// Final-line-of-defence sweep: if anything resolves via process.exit() or an
+// async path that bypasses gracefulShutdown, this synchronous hook still
+// reaps child processes so the host doesn't get cluttered with orphans.
+process.on('exit', () => {
+  if (spawnedProcs.size > 0) {
+    reapAllChildren('process_exit');
+  }
+});
 
 // A fatal error puts the bridge in an undefined state — orphaned children,
 // half-flushed SSE streams, and an unknown view of the session map. Log
 // loudly, attempt graceful shutdown, and exit non-zero so a supervisor can
 // restart cleanly instead of letting the process limp on with corrupt state.
 process.on('uncaughtException', (err) => {
-  console.error('  [FATAL] Uncaught exception:', err && err.stack ? err.stack : err);
+  rootLogger.fatal('Uncaught exception', { error: err && err.message, stack: err && err.stack });
+  recordError(`Uncaught exception: ${err && err.message}`);
   try { gracefulShutdown('uncaughtException'); } catch { /* ignore */ }
   setTimeout(() => process.exit(1), 1000).unref();
 });
 
 process.on('unhandledRejection', (reason) => {
-  console.error('  [FATAL] Unhandled rejection:', reason);
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  rootLogger.error('Unhandled rejection', { reason: msg });
+  recordError(`Unhandled rejection: ${msg}`);
+  // Do not exit on unhandled rejection by default — Node will downgrade these
+  // to crashes in the future. For now we log + record so /health reflects it
+  // without losing in-flight runs.
 });

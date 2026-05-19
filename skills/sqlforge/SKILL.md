@@ -1,12 +1,16 @@
 ---
 name: sqlforge
-description: Runtime operating contract for SQL Curator when Claude Code must fetch Jira via native MCP, reconcile BigQuery schema inside a mandatory project.dataset, build STM, generate/convert BigQuery SQL, validate/dry-run, post Jira updates, emit Activity Feed events, or deploy generated SQL through native GitHub MCP.
+description: Runtime operating contract for SQL Curator — a BigQuery SQL generation tool (no conversion). Designed to work even when Jira stories, uploaded files, or free-text requirements are ambiguous or under-specified: progresses through inference with confidence scoring, asks focused clarification only when confidence falls below threshold, and incorporates user feedback to refine the generated SQL. Responsibilities: fetch Jira via native MCP, reconcile BigQuery schema inside a mandatory project.dataset, build STM, generate BigQuery SQL, validate/dry-run, post Jira updates, emit Activity Feed events, and deploy generated SQL through native GitHub MCP when the user requests it.
 ---
 
 # SQL Curator Runtime Skill
 
 ## Operating Role
 Act as the workflow engine. The UI is only a shell for intake, Activity Feed, clarification prompts, SQL/STM rendering, and user-triggered deploy. Keep requirement understanding, confidence decisions, schema reconciliation, STM, SQL, validation, Jira, and GitHub actions inside Claude Code.
+
+**Scope is BigQuery SQL generation only.** Legacy-SQL conversion, dialect translation, and rewrite tasks are out of scope and must be rejected with a short explanation — do not attempt them even if the user supplies legacy SQL as context. Legacy SQL provided as context may be read only as a reference signal for intent, never translated.
+
+**Designed for ambiguous inputs.** Jira stories, uploaded files, and free-text requirements will often be incomplete, vague, or contradictory. Do not stall. Progress through inference with explicit confidence scoring (S06 confidence gate) — at ≥90% record the inference and continue; at 50–89% surface a focused clarification with 2–5 ranked options; at <50% ask directly and allow free text. Every inference must be recorded with evidence so the user can correct it on the next turn. User feedback (clarification answers, regeneration reasons) becomes new context for the next pass; never discard it.
 
 Never expose private chain-of-thought. Emit architect-readable findings, evidence, rationale, assumptions, decisions, dry-run errors/fixes, and action results.
 
@@ -39,8 +43,9 @@ Consolidate Jira, file text, and free text into one requirement context.
 - Emit Activity event: what sources were received, Jira key/status if any, and classification with rationale.
 
 ### S02 Use-Case Classifier
-Decide one: `GENERATE_SQL`, `CONVERT_SQL`, `CLARIFY_REQUIREMENT`, or `GITHUB_DEPLOY`.
-- If mode is unclear but SQL generation is likely >=90%, continue as generation and record the inference.
+Decide one: `GENERATE_SQL`, `CLARIFY_REQUIREMENT`, or `GITHUB_DEPLOY`. Conversion / rewrite / dialect translation is **not** a supported mode — if the user asks for one, return a short refusal and stop.
+- Default to `GENERATE_SQL` unless the input is too ambiguous to begin even with inference (then `CLARIFY_REQUIREMENT`) or the user explicitly clicks Deploy after a successful generation (then `GITHUB_DEPLOY`).
+- Ambiguity alone does not block `GENERATE_SQL`. Begin generation, record inferences with evidence, and let the S06 confidence gate decide whether to surface a clarification or auto-approve.
 - Emit Activity event: selected use case and confidence.
 
 ### S03 Requirement Decomposer
@@ -69,14 +74,33 @@ Emit Activity event: target scope applied.
 
 ### S05 Schema/Object Reconciliation
 Use native BigQuery MCP only when schema details are missing, implicit, ambiguous, or need validation.
-Inside the target dataset only:
-- verify dataset exists
-- list relevant tables/views by derived terms
-- inspect schemas only for candidate tables/views
-- score candidates by evidence from Jira/file/free text
-- identify exact missing tables/columns/keys
 
-Do not browse unrelated datasets. If no meaningful candidate exists inside the target dataset, ask clarification.
+**Mandatory: Term-Extraction-First protocol — follow this exact sequence, never skip steps.**
+
+**Step 1 — Extract search terms from context before any BigQuery call.**
+Pull entity nouns and domain keywords from all available context: Jira title, story description, acceptance criteria, comments, uploaded file headings, and free-text. Examples of good terms: `customer`, `broadband`, `usage`, `orders`, `monthly`, `revenue`. Do this in your head — no BigQuery call yet.
+
+**Step 2 — Verify the dataset exists (one call).**
+Call `list_dataset_ids` or equivalent to confirm `projectId.datasetId` is accessible. Stop if it does not exist — ask clarification.
+
+**Step 3 — Filter table names by extracted terms (one call).**
+Call `list_table_ids` for the target dataset. Do NOT inspect schemas yet. Filter the returned list client-side: keep only table names that contain at least one extracted term (case-insensitive substring or word match). This is O(terms) string matching on the name list — it is fast and free.
+
+**Step 4 — Score and rank candidates (no BigQuery call).**
+Score each candidate table by counting how many distinct extracted terms appear in its name. Rank descending. Keep only the top-3 candidates. If fewer than 3 pass the filter, keep all that passed. If zero pass, widen to prefix matching on the first meaningful noun, or ask clarification.
+
+**Step 5 — Inspect schemas for top-3 candidates only.**
+Call `get_table_info` or `get_table_schema` for each of the top-3 candidates only — never for the full table list. Identify exact columns, types, join keys, and partition fields.
+
+**Step 6 — Score columns against requirements.**
+Map extracted terms to column names within the top-3 candidates. Identify the best source table(s) based on column overlap. Record confidence and evidence.
+
+Rules:
+- Never call `get_table_info` on more than 3 tables per schema resolution pass.
+- Never list or inspect tables from outside the mandatory target dataset.
+- If no candidate scores above 0 after step 3, emit one clarification asking the user to name the source table(s) — do not broaden to a full dataset scan.
+- Emit Activity event after step 4 (candidates shortlisted with scores) and after step 6 (schema confirmed with evidence).
+
 Emit Activity event with candidate table(s), confidence, evidence, and gaps.
 
 ### S06 Confidence Gate
@@ -172,40 +196,34 @@ Validate before returning:
 
 Emit Activity event: audit result with pass/warning/fail details.
 
-### S11 BigQuery Dry Run
-When native BigQuery MCP can perform a dry run, run it against the generated SQL or executable equivalent.
-- Do not execute mutating SQL.
-- If procedure/DML cannot be dry-run directly, dry-run the SELECT-producing body or safe equivalent and state the limitation.
-- If dry run fails, diagnose, fix, and retry up to 3 times when the fix is safe and local.
-- Record every dry-run error, diagnosis, fix, and retry result.
+### S11 BigQuery Dry-Run via MCP (bridge-owned verdict)
+Call the BigQuery dry-run/readonly MCP tool (`mcp__claude_ai_Google_Cloud_BigQuery__execute_sql_readonly` or equivalent) with the final generated SQL. This call is **mandatory** on every SQL-generation run. The bridge reads the raw `tool_result` of this call — specifically the `is_error` flag — and derives the gate verdict from it. Claude's prose `validation.sqlChecks.status` is **discarded** and replaced by the bridge's verdict.
 
-Emit Activity event for each dry-run attempt and auto-fix.
+Rules:
+- Invoke the dry-run tool exactly once per attempt. If the result returns an error, you may apply **one** safe fix and re-invoke once more. The bridge uses the **last** tool_result as the verdict.
+- Do not paraphrase or summarise the tool result into `sqlChecks.status` and expect it to influence the gate — it will not. Your prose verdict is ignored.
+- Do not skip the tool call under any circumstance. Absence of a dry-run tool_result in the stream causes the bridge to set the gate to `not_run` and withhold the SQL.
+- Do not call the mutating `execute_sql` tool for validation. Use only the readonly/dry-run variant.
 
-**After all retries are exhausted and the dry run still fails:**
+Emit one `validation`-type Activity block describing the dry-run attempt(s) and any fix you applied between attempts. Then proceed to S12/S13.
 
-1. Emit a `validation` `error` activity block:
-   - `title`: `"Dry Run Failed — User Input Required"`
-   - `summary`: Exact BigQuery error message and root-cause diagnosis (missing column, wrong type, unresolved reference, etc.)
-   - `details`: All attempted fixes in order and why each failed
-   - `evidence`: The failing SQL fragment and error location
+The bridge will emit one additional Activity card sourced from `bigquery` with the authoritative verdict — that card supersedes any prose claim you make about validation status.
 
-2. Emit `[CLARIFY]` followed by a `clarification` JSON block:
-   ```clarification
-   {
-     "explanation": "<Specific failure reason, e.g. Column `customer_id` not found in `project.dataset.orders`>",
-     "details": "<Full diagnosis + every fix that was attempted and why it did not resolve the error>",
-     "question": "How would you like to proceed?",
-     "options": [
-       "Apply proposed fix: <concrete fix description>",
-       "Provide the correct column or table name",
-       "Skip dry-run validation and release SQL as-is",
-       "Restart with updated schema context"
-     ],
-     "allowFreeText": true
-   }
-   ```
+### Bridge Validation Layers (gate composition)
+After your main pass exits with [SQL_READY], the bridge runs three independent verdicts. **All three must pass** for SQL to surface to the UI. You do not run these; you only need to produce inputs of sufficient quality.
 
-3. Do **not** emit `[SQL_READY]`. Withhold the SQL until after the user's response is received, the suggested fix is applied, and a successful dry run completes. Resume from S11, not from S01.
+| Layer | What it checks | Source of truth | Bridge owns |
+|---|---|---|---|
+| L1 — Executional | Does the SQL parse and resolve in BigQuery? | Raw `tool_result.is_error` from your S11 dry-run | Yes — verdict from MCP response, your prose is ignored |
+| L2 — Structural  | Does the SQL implement what the STM declared? | Mechanical SQL ↔ STM comparison: target column coverage, source table coverage, target object match, BQ dry-run output schema vs STM target types | Yes — deterministic, no LLM |
+| L3 — Semantic    | Does the STM cover every acceptance criterion in the requirements? | Cold Claude session (no SQL, no history, no MCP) reading raw requirement text + STM JSON | Yes — runs in a separate session insulated from generation context |
+
+Implications for your work:
+- The STM you produce in S07 is now a **first-class artifact**, not a side product. L2 and L3 both validate against it. Sloppy or incomplete STM rows will fail the gate even if the SQL runs cleanly.
+- Every acceptance criterion must map to at least one STM row (transformation, businessRule, target column, or source field reference). Orphaned criteria fail L3.
+- Every STM target column must appear in the SQL's outermost SELECT with the declared type. Missing or mistyped columns fail L2.
+- Every STM source table must appear in a FROM/JOIN clause. Missing source tables fail L2.
+- L3 runs only after L1 and L2 pass. L2 runs only after L1 passes. A failure in any layer surfaces a specific blocking reason in the validation summary.
 
 ### S12 Jira Completion
 For Jira-backed successful SQL generation:
@@ -380,4 +398,9 @@ Do not return `[SQL_READY]` unless:
 - Clarification was not needed or was answered.
 - Jira update was attempted for Jira-backed generation.
 - Activity Feed has meaningful events, not only pipeline milestones.
-- **`validation.sqlChecks.status` is `pass`.** The bridge enforces this gate: if `sqlChecks.status` is `warning`, `fail`, or `not_run`, the generated SQL is withheld from the UI and the run is reported as failed regardless of `[SQL_READY]`. Always attempt a BigQuery dry run (S11) and run the diagnose-fix-retry loop up to 3 times before declaring readiness. If the dry run cannot be performed (no MCP support, permission denied), set `sqlChecks.status` to `warning` and surface a clarification — do not emit `[SQL_READY]`. If all retries are exhausted and the dry run still fails, emit `[CLARIFY]` per the S11 failure path — never emit `[SQL_READY]` on an unresolved dry-run failure.
+- **All three bridge validation layers must pass.** The composite gate is `L1 dry-run AND L2 structural AND L3 coverage`. You influence each layer through the artifacts you produce:
+  - **L1**: invoke the BQ dry-run/readonly MCP tool at S11 with the final SQL. The bridge reads its `is_error` flag.
+  - **L2**: your STM must declare every target column, source table, and target type accurately. The bridge mechanically verifies the SQL implements the STM.
+  - **L3**: your STM must cover every acceptance criterion in the requirements. A cold Claude session reads the raw requirements and the STM (no SQL) and judges coverage independently.
+  
+  Your prose verdicts in the `validation` JSON block are overwritten by the bridge-derived verdicts before the UI sees them. Emit `[SQL_READY]` after S11; the bridge decides whether the SQL surfaces.

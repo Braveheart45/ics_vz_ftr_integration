@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { Maximize2, Minimize2 } from 'lucide-react';
+import { Maximize2, Minimize2, MessageSquare } from 'lucide-react';
 import { TaskTypeSelector } from './task-type-selector';
 import { InputSection } from './input-section';
 import { ChatPanel } from './chat-panel';
@@ -31,12 +31,10 @@ export function RightPanel() {
   const inputSection = (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-border/60 bg-background shadow-[0_2px_8px_0_oklch(0_0_0/0.04),0_1px_2px_0_oklch(0_0_0/0.03)]">
       <div className="flex h-11 shrink-0 items-center justify-between border-b border-border/40 bg-muted/40 px-3">
-        <div className="flex-1 flex items-center justify-center">
-          <TaskTypeSelector />
-        </div>
+        <TaskTypeSelector />
         <button
           onClick={() => setInputMaximized((v) => !v)}
-          className="ml-2 flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+          className="flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
           title={inputMaximized ? 'Restore (Esc)' : 'Maximize'}
         >
           {inputMaximized ? <Minimize2 className="size-3.5" /> : <Maximize2 className="size-3.5" />}
@@ -51,7 +49,10 @@ export function RightPanel() {
   const chatSection = (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-border/60 bg-background shadow-[0_2px_8px_0_oklch(0_0_0/0.04),0_1px_2px_0_oklch(0_0_0/0.03)]">
       <div className="flex h-11 shrink-0 items-center justify-between border-b border-border/40 bg-muted/40 px-3">
-        <span className="text-xs font-semibold text-foreground/70 tracking-wide">Clarification Panel</span>
+        <div className="flex items-center gap-1.5 rounded-md bg-[#4285F4] px-2.5 py-1 text-xs font-semibold text-white shadow-[0_1px_2px_0_oklch(0_0_0/0.03)]">
+          <MessageSquare className="size-3 text-white/80" />
+          <span>Clarification Panel</span>
+        </div>
         <button
           onClick={() => setChatMaximized((v) => !v)}
           className="flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"

@@ -18,6 +18,15 @@ import {
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Textarea } from '@/components/ui/textarea';
+import { Checkbox } from '@/components/ui/checkbox';
+import { Label } from '@/components/ui/label';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from '@/components/ui/dialog';
 import {
   Tooltip,
   TooltipContent,
@@ -31,6 +40,14 @@ import { cn } from '@/lib/utils';
 import { postAndStream, processSSEStream } from '@/lib/sse-client';
 import { validateBqDatasetId, validateBqProjectId } from '@/lib/target-scope';
 import type { StmRow } from '@/lib/types';
+
+const REGENERATE_REASON_OPTIONS = [
+  'Query optimization',
+  'Business logic correction',
+  'Schema or table change',
+  'Different SQL approach',
+  'Other',
+] as const;
 
 const STM_COLUMNS: { key: keyof StmRow; label: string }[] = [
   { key: 'sourceField', label: 'Source Field' },
@@ -66,6 +83,9 @@ export function SqlEditor() {
   const [isRegenerating, setIsRegenerating] = useState(false);
   const [isDeploying, setIsDeploying] = useState(false);
   const [sqlFlash, setSqlFlash] = useState(false);
+  const [showRegenerateDialog, setShowRegenerateDialog] = useState(false);
+  const [regenerateReasons, setRegenerateReasons] = useState<string[]>([]);
+  const [regenerateContext, setRegenerateContext] = useState('');
   const abortRef = useRef<AbortController | null>(null);
 
   const buildStmCsv = useCallback((rows: StmRow[]) => {
@@ -157,29 +177,7 @@ export function SqlEditor() {
   }, []);
 
   // ── Regenerate (SSE streaming) ───────────────────────────
-  const handleRegenerate = useCallback(async () => {
-    if (!bqProjectInput.projectId.trim()) {
-      toast.error('Target BigQuery Project ID is required.');
-      return;
-    }
-
-    const projectValidation = validateBqProjectId(bqProjectInput.projectId);
-    if (!projectValidation.ok) {
-      toast.error(projectValidation.error);
-      return;
-    }
-
-    if (!bqProjectInput.datasetId.trim()) {
-      toast.error('Target BigQuery Dataset ID is required.');
-      return;
-    }
-
-    const datasetValidation = validateBqDatasetId(bqProjectInput.datasetId);
-    if (!datasetValidation.ok) {
-      toast.error(datasetValidation.error);
-      return;
-    }
-
+  const executeRegenerate = useCallback(async (reasonMessage?: string) => {
     setIsRegenerating(true);
     useAppStore.getState().setStreaming(true);
     useAppStore.getState().setAgentRunning(true);
@@ -196,6 +194,9 @@ export function SqlEditor() {
       role: m.role,
       content: m.content,
     }));
+    if (reasonMessage) {
+      chatHistory.push({ role: 'user', content: reasonMessage });
+    }
 
     try {
       const res = await postAndStream('/api/generate', {
@@ -221,6 +222,41 @@ export function SqlEditor() {
       abortRef.current = null;
     }
   }, [messages, sessionId, taskType, bqProjectInput, jiraInput, contextText]);
+
+  const handleRegenerate = useCallback(() => {
+    if (!bqProjectInput.projectId.trim()) {
+      toast.error('Target BigQuery Project ID is required.');
+      return;
+    }
+    const projectValidation = validateBqProjectId(bqProjectInput.projectId);
+    if (!projectValidation.ok) {
+      toast.error(projectValidation.error);
+      return;
+    }
+    if (!bqProjectInput.datasetId.trim()) {
+      toast.error('Target BigQuery Dataset ID is required.');
+      return;
+    }
+    const datasetValidation = validateBqDatasetId(bqProjectInput.datasetId);
+    if (!datasetValidation.ok) {
+      toast.error(datasetValidation.error);
+      return;
+    }
+    setRegenerateReasons([]);
+    setRegenerateContext('');
+    setShowRegenerateDialog(true);
+  }, [bqProjectInput]);
+
+  const handleRegenerateConfirm = useCallback(() => {
+    const reasons = regenerateReasons.length > 0 ? regenerateReasons.join(', ') : 'Not specified';
+    const parts = [`Regeneration requested. Reason(s): ${reasons}.`];
+    if (regenerateContext.trim()) {
+      parts.push(`Additional context: ${regenerateContext.trim()}`);
+    }
+    parts.push('Please re-analyse the full context, prior decisions, inferences, and assumptions, then regenerate the SQL addressing this feedback.');
+    setShowRegenerateDialog(false);
+    executeRegenerate(parts.join(' '));
+  }, [regenerateReasons, regenerateContext, executeRegenerate]);
 
   const handleDeployToGitHub = useCallback(async () => {
     if (!sqlOutput) return;
@@ -307,6 +343,51 @@ export function SqlEditor() {
     },
     [updateSql]
   );
+
+  // ── Regenerate Dialog ────────────────────────────────────
+  function RegenerateDialog() {
+    return (
+      <Dialog open={showRegenerateDialog} onOpenChange={setShowRegenerateDialog}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="text-sm font-semibold">Why are you regenerating?</DialogTitle>
+          </DialogHeader>
+          <div className="flex flex-col gap-2 py-1">
+            {REGENERATE_REASON_OPTIONS.map((option) => (
+              <div key={option} className="flex items-center gap-2">
+                <Checkbox
+                  id={`regen-${option}`}
+                  checked={regenerateReasons.includes(option)}
+                  onCheckedChange={(checked) => {
+                    setRegenerateReasons((prev) =>
+                      checked ? [...prev, option] : prev.filter((r) => r !== option)
+                    );
+                  }}
+                />
+                <Label htmlFor={`regen-${option}`} className="text-xs font-normal cursor-pointer">
+                  {option}
+                </Label>
+              </div>
+            ))}
+            <Textarea
+              placeholder="Additional context (optional)"
+              className="mt-2 min-h-[72px] resize-none text-xs"
+              value={regenerateContext}
+              onChange={(e) => setRegenerateContext(e.target.value)}
+            />
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="ghost" size="sm" onClick={() => setShowRegenerateDialog(false)}>
+              Cancel
+            </Button>
+            <Button size="sm" onClick={handleRegenerateConfirm}>
+              Regenerate
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    );
+  }
 
   // ── Toolbar button ───────────────────────────────────────
   function ToolBtn({
@@ -487,9 +568,15 @@ export function SqlEditor() {
           onClick={toggleMaximize}
         />
         <div className="fixed inset-0 z-50 overflow-hidden shadow-2xl">{editorContent}</div>
+        <RegenerateDialog />
       </>
     );
   }
 
-  return editorContent;
+  return (
+    <>
+      {editorContent}
+      <RegenerateDialog />
+    </>
+  );
 }
