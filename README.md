@@ -13,7 +13,7 @@ npm install
 Create a `.env` file at the project root:
 
 ```
-OPENAI_API_KEY=sk-...
+OPENAI_API_KEY=...
 OPENAI_MODEL=gpt-4.1            # or gpt-4.1-mini for ~5× cheaper runs
 ```
 
