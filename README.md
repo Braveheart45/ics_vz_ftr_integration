@@ -1,191 +1,288 @@
 # SQL Curator
 
-A BigQuery SQL generation tool. Takes ambiguous Jira stories, uploaded files, or free-text requirements and produces production-grade BigQuery SQL with a structured Source-to-Target Map (STM) and bridge-owned validation warnings.
+SQL Curator is a minimalist local UI over Claude Code for BigQuery SQL generation. It accepts Jira stories, plain-text file context, and free-text requirements, then streams Claude Code progress while Claude generates:
 
-**Scope is SQL generation only.** Legacy-SQL conversion, dialect translation, and rewrite tasks are out of scope and refused. Designed to keep moving when inputs are incomplete: every inference is recorded with evidence and confidence; user feedback (clarification answers, regeneration reasons) becomes context for the next pass.
+- BigQuery SQL
+- a Source-to-Target Map (STM)
+- structured validation results
+- Jira update results when a Jira story is supplied
 
-For day-to-day operations, see [`RUNBOOK.md`](RUNBOOK.md). For Claude's operating contract, see [`skills/generator.md`](skills/generator.md).
+The UI is a presentation shell. Requirement inference, schema reconciliation, SQL generation, validation, Jira updates, and GitHub deployment decisions stay inside Claude Code through the local bridge and native MCP connectors.
 
----
+Scope is SQL generation only. Legacy SQL conversion, dialect translation, and rewrite tasks are intentionally out of scope.
 
-## Architecture at a glance
-
-```
-Browser ── HTTPS ──▶ Next.js (port 3000) ──▶ claude-bridge (port 3001)
-                                                     │
-                                                     │ spawn
-                                                     ▼
-                                              Claude CLI (-p, stream-json)
-                                                     │
-                                                     ▼
-                                         MCP servers: Jira • BigQuery • GitHub
-```
-
-The browser never talks to MCP servers directly. Every external action flows through `claude-bridge`, which orchestrates Claude CLI sessions, parses their stream-json output, emits SQL artifacts, and surfaces bridge-owned validation results.
+For day-to-day operations, see [RUNBOOK.md](RUNBOOK.md). For Claude's runtime contract, see [skills/generator.md](skills/generator.md).
 
 ---
 
-## Repository layout
+## Architecture
 
+```text
+Browser -> Next.js UI/API (port 3000) -> claude-bridge (port 3001)
+                                             |
+                                             v
+                                  Claude Code CLI (-p, stream-json)
+                                             |
+                                             v
+                         Native MCP connectors: Jira, BigQuery, GitHub
 ```
+
+The browser never talks to Jira, BigQuery, GitHub, or MCP servers directly. Next.js forwards requests to `mini-services/claude-bridge`, and the bridge assembles the prompt, runs Claude Code, translates stream-json into SSE events, extracts artifacts, and normalizes fallback validation data when Claude omits structured sections.
+
+---
+
+## Current Workflow
+
+Claude Code runs the app skill from [skills/generator.md](skills/generator.md) on every request. The current runtime is a single linear S01-S14 flow:
+
+1. Intake Jira, uploaded text, and free-text context.
+2. Apply the mandatory BigQuery target scope: `projectId.datasetId`.
+3. Reconcile schema only inside the supplied target dataset.
+4. Build the STM before writing SQL.
+5. Generate BigQuery SQL from the STM.
+6. Validate inside the same session using the S11 neutral validator persona from [skills/validator.md](skills/validator.md).
+7. Run a mandatory BigQuery dry-run in S12.
+8. For Jira-backed runs, post a Jira comment and transition the issue to `In Progress` in S13.
+9. Emit SQL, STM, structured validation JSON, and `[SQL_READY]`.
+
+If Claude needs a user decision, it emits `[CLARIFY]` plus a structured clarification block. The SQL Curator Assistant panel is reserved for those clarification prompts and user answers.
+
+---
+
+## Repository Layout
+
+```text
 src/                              Next.js frontend (TypeScript, App Router)
   app/                            Pages and API route handlers
-  components/split/               Three-pane workspace UI
+  components/split/               Three-pane SQL Curator workspace
   lib/                            Shared types, SSE client, target-scope rules
   stores/                         Zustand app state
 
-mini-services/claude-bridge/      Node.js HTTP/SSE bridge
-  index.js                        HTTP server + claude-session orchestration
-  config.js                       Env loader, range-checked, fail-fast
-  logging.js                      pino-backed leveled logger
-  metrics.js                      Counters, gauges, bucketed histograms
-  request-validation.js           Schema-driven request validator
-  activity.js                     Activity Feed event normalisers
-  tool-helpers.js                 MCP tool_result parsers
-  output-parsers.js               Extractors over Claude's text output
-  structural-checks.js            L2 deterministic SQL ↔ STM checks
+mini-services/claude-bridge/      Local Claude Code HTTP/SSE bridge
+  index.js                        HTTP server and Claude session orchestration
+  config.js                       Env loader with fail-fast validation
+  logging.js                      pino-backed structured logging
+  metrics.js                      Counters, gauges, histogram snapshots
+  request-validation.js           Bridge request validation
+  release-policy.js               SQL release and warning policy
+  activity.js                     Activity Feed normalization
+  tool-helpers.js                 MCP tool_result parsing helpers
+  output-parsers.js               SQL/STM/validation/activity extractors
   tests/                          node --test unit tests
-  .env.example                    Every env var the bridge consumes
 
-skills/generator.md          Claude's operating contract (loaded into
-                                  every session). Specifies the canonical
-                                  S01–S13 stage SOP, output contract, and
-                                  the bridge validation layers.
+skills/
+  generator.md                    Main Claude Code runtime contract
+  validator.md                    S11 validator persona contract
 
-AGENTS.md                         Coding-agent instructions for this repo
-RUNBOOK.md                        Operational runbook (deployment + ops)
+AGENTS.md                         Coding-agent instructions
+RUNBOOK.md                        Operational runbook
+docs/remote-access.md             LAN/remote access notes
 ```
 
 ---
 
-## Validation
+## Validation Contract
 
-The bridge validates every SQL generation through three layers. SQL is emitted to the UI whenever Claude returns a fenced SQL block. If validation fails or cannot complete, the UI shows a warning and Jira completion is skipped.
+Generated SQL responses must include:
 
-| Layer | What it checks | Verdict source | LLM in verdict? |
-|---|---|---|---|
-| **L1 — Executional** | Did an observed BigQuery dry-run/read return an error? | Raw `tool_result.is_error` from any main-session dry-run/read call; `not_run` when S11 stays logical-only | No |
-| **L2 — Structural** | Does the SQL implement what the STM declared? Target column coverage, source table coverage, target object match, output schema vs STM types | Mechanical SQL ↔ STM comparison in [`structural-checks.js`](mini-services/claude-bridge/structural-checks.js) | No |
-| **L3 — Semantic/Repair** | Does the STM cover every acceptance criterion, are confidence claims sound, and does SQL implement the STM? | Fresh Claude session given requirements, SQL, STM, inferences, decisions, and scope (no chat history or tools) | Yes — cold, independent, and allowed to return corrected SQL |
+- one fenced `sql` block
+- one fenced `stm` JSON block
+- one fenced `validation` JSON block
+- final sentinel `[SQL_READY]`
 
-Claude's prose `validation.sqlChecks.status` is discarded and overwritten by the bridge-derived verdict before the UI sees it. The skill explicitly tells Claude this so it cannot influence validation by claiming success.
+The validation JSON must contain:
+
+- `requirementCoverage`
+- `stmCompleteness`
+- `schemaReconciliation`
+- `sqlChecks`
+- `jiraTransition`
+
+The bridge now uses a single-source validation model. Claude performs validator review, dry-run, and Jira completion inline in the main session. The bridge computes the SQL warning state from the worst status across requirement coverage, STM completeness, and SQL dry-run results. SQL is still surfaced whenever a fenced SQL block exists, but warnings are attached when validation is incomplete, warning, or failed.
+
+Jira-backed generation must report Jira comment and transition results in `jiraTransition`.
 
 ---
 
-## Quickstart (local development)
+## Quickstart
 
 ### Prerequisites
-| Requirement | Details |
-|---|---|
-| Node.js | 18+ (tested on 26) |
-| Bun | [bun.sh](https://bun.sh) — package manager and dev server |
-| Claude Code CLI | `npm install -g @anthropic-ai/claude-code` then `claude login` |
-| MCP servers | Atlassian Rovo (Jira), Google Cloud BigQuery, GitHub — configured in `~/.claude.json` |
 
-### Frontend
+| Requirement | Details |
+| --- | --- |
+| Node.js | 18+ |
+| Bun | Used for install/dev workflows |
+| Claude Code CLI | Install and authenticate locally with `claude login` |
+| MCP connectors | Jira, BigQuery, and GitHub configured in Claude Code as needed |
+
+### Install
+
 ```bash
 bun install
-npm run dev                       # http://localhost:3000
+cd mini-services/claude-bridge
+npm install
 ```
 
-### Bridge
+### Configure
+
+Root `.env`:
+
+```env
+USE_CLAUDE_BRIDGE=true
+BRIDGE_PORT=3001
+```
+
+Bridge `.env`:
+
 ```bash
 cd mini-services/claude-bridge
-cp .env.example .env              # edit if needed; all values have defaults
-npm install                       # installs pino
-npm run dev                       # bun --hot index.js → http://localhost:3001
-# or
-npm start                         # node index.js
+copy .env.example .env
 ```
 
-### Tests
+Every bridge variable is optional and has a validated default. Invalid values fail fast at bridge startup.
+
+### Run
+
+Start the bridge:
+
 ```bash
 cd mini-services/claude-bridge
-npm test                          # node --test, no external services
+npm start
 ```
 
----
+Start the UI from the repo root:
 
-## HTTP API
-
-### `POST /chat`
-Start an SQL-generation run. Response is Server-Sent Events.
-
-**Headers**
-- `Content-Type: application/json` (required)
-- `Idempotency-Key: <8–128 chars [A-Za-z0-9_-]>` (optional) — within a 10-minute TTL, repeats are rejected with `409 REQUEST_IN_FLIGHT` or `REQUEST_ALREADY_COMPLETED`.
-
-**Body** — see [`request-validation.js`](mini-services/claude-bridge/request-validation.js) for the validated schema and error codes.
-
-**Error envelope** — every 4xx/5xx returns:
-```json
-{ "error": { "code": "BQ_PROJECT_FORMAT", "message": "...", "field": "bqProjectId" } }
+```bash
+npm run dev
 ```
 
-### `GET /health`
-Layered status. Returns 200 when Claude CLI is reachable, 503 otherwise. Reports `ready` / `claude_not_found` / `degraded_capacity` / `recent_errors`. Full schema in [`RUNBOOK.md`](RUNBOOK.md#health-endpoint).
+Open `http://localhost:3000`.
 
-### `GET /metrics`
-JSON snapshot of counters, gauges, and bucketed-histogram timings. Notable series:
-
-- `requests_total{endpoint,taskType}` — incoming volume
-- `request_duration_ms{endpoint}` — histogram, buckets 50ms → 5min
-- `validation_layer_result{layer,status}` — L1 / L2 / L3 pass-fail-warning counts
-- `claude_sessions_aborted{reason}` — `client_disconnect` / `pre_aborted`
-- `auto_retry_attempts{reason}`, `idempotency_collision{state}`, `stream_buffer_overflow{accumulator}`
-
-### `DELETE /session/:id`
-Clears the in-memory session map for a given id.
-
----
-
-## Configuration
-
-Everything is environment-driven and validated at startup. Malformed values throw with an aggregated error report instead of letting the bridge boot in a half-configured state.
-
-See [`.env.example`](mini-services/claude-bridge/.env.example) for the complete annotated list. The most-touched variables:
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `BRIDGE_PORT` | `3001` | HTTP listener port |
-| `CLAUDE_MAX_TURNS` | `25` | Tool-use turns per main session |
-| `CLAUDE_TIMEOUT_MS` | `1200000` | Wall-clock cap per session (20 min) |
-| `CLAUDE_MAX_CONCURRENT` | `3` | Concurrent in-flight bridge requests |
-| `SQL_CURATOR_L3_COVERAGE_CHECK` | `true` | Enable the L3 cold semantic-coverage session |
-| `SQL_CURATOR_L3_TIMEOUT_MS` | `45000` | Cold-session timeout (ms) |
-| `SQL_CURATOR_DEFER_JIRA_COMPLETION` | `true` | Two-pass Jira ordering — comment + transition run after validation passes |
-| `SQL_CURATOR_LOG_LEVEL` | `info` | `trace` / `debug` / `info` / `warn` / `error` / `fatal` |
-| `SQL_CURATOR_LOG_PRETTY` | `false` | Switch to `pino-pretty` single-line output for dev |
-| `SQL_CURATOR_MAX_STREAM_BUFFER_BYTES` | `8388608` | Bounded buffer on stream accumulators (overflow aborts the session) |
-
----
-
-## Operational concerns
-
-- **Logging** — pino-backed structured JSON to stdout. Every per-request log line carries `requestId`, `sessionId`, `component`, and `phase`. The bridge echoes `requestId` in the `X-Request-Id` response header. Grep one run end-to-end with `requestId=<id>`.
-- **Client disconnect** — bridge watches `req.on('close')` and aborts the spawned Claude tree via `AbortController`. Windows uses `taskkill /T` to take down the MCP subtree; POSIX uses SIGTERM → SIGKILL escalation. A disconnect during an in-flight run does not orphan the child process.
-- **Graceful shutdown** — SIGTERM / SIGINT / SIGHUP all run `gracefulShutdown` which reaps every tracked child before exit. `process.on('exit')` is a final-line-of-defence sweep. `uncaughtException` logs fatal, reaps children, and exits non-zero so a supervisor restarts cleanly.
-- **Idempotency** — clients submitting an `Idempotency-Key` header get protection against double-submit. Within a 10-minute TTL, the same key returns 409 instead of spawning a duplicate Claude session.
-- **Bounded buffers** — stream accumulators capped at `SQL_CURATOR_MAX_STREAM_BUFFER_BYTES` (default 8 MB). A runaway MCP response that exceeds the cap aborts the session with an explicit error card instead of OOMing the bridge.
-
-Full deployment, monitoring, and rollback procedures: [`RUNBOOK.md`](RUNBOOK.md).
-
----
-
-## LAN access for colleagues
+For LAN access:
 
 ```bash
 npm run dev:public
 ```
 
-Bind the UI to all network interfaces so colleagues on the same network can connect. Share `http://<your-machine-IP>:3000`. Each user must have Claude Code CLI installed and authenticated with their own account.
+Share `http://<your-machine-IP>:3000`.
+
+---
+
+## Supported Inputs
+
+Mandatory:
+
+- BigQuery project ID
+- BigQuery target dataset ID
+
+Optional context:
+
+- Jira project/story number
+- free-text requirements
+- uploaded plain-text files
+
+Supported file inputs are text only: TXT, CSV, JSON, MD, and SQL. PDF, DOCX, XLSX, and PPTX are not supported unless real extraction is added.
+
+---
+
+## HTTP API
+
+### `POST /api/chat`
+
+Next.js endpoint used by the UI for SQL generation. It validates target scope, then forwards the request to the bridge.
+
+### `POST /api/generate`
+
+Regeneration endpoint. It follows the same bridge path as `/api/chat`.
+
+### `POST /api/deploy`
+
+GitHub deployment endpoint. It forwards `taskType: "github_deploy"` to Claude Code. Deployment uses the native GitHub MCP connector and only happens after the user explicitly triggers deploy.
+
+### Bridge `POST /chat`
+
+Internal bridge endpoint called by Next.js. Response is Server-Sent Events.
+
+Important request requirements:
+
+- `sessionId` is required.
+- `messages` must contain at least one message.
+- `taskType` must be `sql_generation` or `github_deploy`.
+- `bqProjectId` and `bqDatasetId` are mandatory.
+- `uploadedFiles` are limited to 16 entries and text content.
+
+### Bridge `GET /health`
+
+Reports bridge readiness, Claude CLI availability, active sessions, recent errors, offline dry-run mode, and validator skill loading.
+
+### Bridge `GET /metrics`
+
+Returns JSON counters, gauges, and histogram snapshots for request volume, request durations, validation statuses, stream buffer overflows, idempotency collisions, aborts, and retry attempts.
+
+### Bridge `DELETE /session/:id`
+
+Clears a stored local bridge session.
+
+---
+
+## Bridge Configuration
+
+Common bridge variables from [mini-services/claude-bridge/.env.example](mini-services/claude-bridge/.env.example):
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `BRIDGE_PORT` | `3001` | Bridge HTTP listener port |
+| `CLAUDE_MAX_TURNS` | `50` | Tool-use turn budget for the linear S01-S14 flow |
+| `CLAUDE_TIMEOUT_MS` | `1200000` | Wall-clock session cap in ms |
+| `CLAUDE_MAX_CONCURRENT` | `3` | Concurrent in-flight bridge requests |
+| `MAX_HISTORY_MESSAGES` | `20` | Recent chat messages forwarded to Claude |
+| `SQL_CURATOR_MAX_REQUEST_BODY_BYTES` | `2097152` | Max accepted request body size |
+| `SQL_CURATOR_MAX_STREAM_BUFFER_BYTES` | `8388608` | Max buffered Claude stream bytes before abort |
+| `SQL_CURATOR_ENABLE_OFFLINE_DRY_RUN` | `false` | Deterministic local stub mode for UI testing |
+| `SQL_CURATOR_LOG_LEVEL` | `info` | `trace`, `debug`, `info`, `warn`, `error`, or `fatal` |
+
+Use offline dry-run only for local UI validation without Claude Code:
+
+```bash
+set SQL_CURATOR_ENABLE_OFFLINE_DRY_RUN=true
+```
+
+---
+
+## Validation Commands
+
+Run these after relevant code changes:
+
+```bash
+npm.cmd run lint
+npm.cmd run build
+node --check mini-services\claude-bridge\index.js
+```
+
+Bridge unit tests:
+
+```bash
+cd mini-services/claude-bridge
+npm test
+```
+
+---
+
+## Operating Notes
+
+- Logging is structured JSON through pino. Request logs include request/session context.
+- Client disconnects abort the spawned Claude process tree.
+- Graceful shutdown reaps tracked child processes on SIGTERM, SIGINT, and SIGHUP.
+- Idempotency keys are supported on the bridge `/chat` endpoint to reject duplicate in-flight or recently completed submissions.
+- Stream accumulators are bounded by `SQL_CURATOR_MAX_STREAM_BUFFER_BYTES`.
+- Bridge activity text should describe user-facing findings, not raw MCP tool names.
 
 ---
 
 ## Contributing
 
-- Run `npm test` in `mini-services/claude-bridge/` before committing.
-- TypeScript checks: `node node_modules/typescript/bin/tsc --noEmit` from the repo root.
-- Frontend changes that affect the UI: start the dev server and verify in a browser.
-- Follow the commit message style in `git log` — short imperative title, structured body explaining the why.
-- See [`AGENTS.md`](AGENTS.md) for coding-agent specific instructions.
+- Keep business logic out of the UI.
+- Keep `skills/generator.md` focused on Claude runtime behavior.
+- Do not add external APIs, custom Jira/BigQuery/GitHub connectors, cloud services, or backend orchestration for this POC.
+- Preserve mandatory BigQuery project and dataset collection.
+- Follow [AGENTS.md](AGENTS.md) for coding-agent instructions.
