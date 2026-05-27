@@ -53,6 +53,7 @@ export interface SqlOutput {
   isEdited: boolean;
   fileName: string;
   generatedAt: string;
+  warning?: string;
 }
 
 // Detected task info (from auto-detect)
@@ -92,6 +93,7 @@ export interface ClarificationHistoryEntry {
 export type StageStatus = 'active' | 'completed' | 'blocked' | 'failed';
 
 export type AgentActivityType =
+  | 'summary'
   | 'observation'
   | 'inference'
   | 'decision'

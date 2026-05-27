@@ -1,52 +1,54 @@
-﻿# SQL Curator Remote Access
+# SQL Curator Remote Access
 
-Use this only for a controlled POC/demo environment. Do not expose SQL Curator on the public internet without authentication, TLS, and network allow-listing.
+Use remote access only for a controlled demo or an internally protected deployment. Do not expose SQL Curator to the public internet unless authentication, TLS, and network restrictions are in place.
 
-## What users access
+## Access Model
 
-Colleagues access only the Next.js UI:
-
-```text
-http://<machine-public-or-private-ip>:3000/
-```
-
-Example:
+Remote users access only the Next.js UI:
 
 ```text
-http://34.14.183.200:3000/
+https://<sql-curator-host>/
 ```
 
-The Claude bridge should remain local to the host:
-
-```text
-http://127.0.0.1:3001
-```
-
-The browser does not need direct access to the bridge. The Next.js `/api/chat` route forwards requests to the bridge from the server side.
-
-## Run locally for colleague access
-
-From the SQL Curator project root, open two terminals on the host machine.
-
-Terminal 1 — Claude bridge, local only:
-
-```powershell
-npm.cmd run bridge
-```
-
-Terminal 2 — UI bound to all network interfaces:
-
-```powershell
-npm.cmd run dev:public
-```
-
-Then share:
+For a short-lived LAN demo without TLS:
 
 ```text
 http://<host-ip>:3000/
 ```
 
-## Production-style run
+The Claude bridge must stay private to the host:
+
+```text
+http://127.0.0.1:3001
+```
+
+Browser clients never call the bridge directly. Next.js API routes forward requests to the local bridge from the server side.
+
+## Demo Runbook
+
+Use this for a trusted LAN or VPN demo only.
+
+1. Start the Claude bridge on the host:
+
+   ```powershell
+   npm.cmd run bridge
+   ```
+
+1. Start the UI on all network interfaces:
+
+   ```powershell
+   npm.cmd run dev:public
+   ```
+
+1. Share the UI URL:
+
+   ```text
+   http://<host-ip>:3000/
+   ```
+
+## Production-Style Runbook
+
+Build once, then run the bridge and UI as supervised processes.
 
 ```powershell
 npm.cmd run build
@@ -54,19 +56,40 @@ npm.cmd run bridge
 npm.cmd run start:public
 ```
 
-## Network requirements
+Recommended production topology:
 
-- The machine must have a reachable private or public IP.
-- TCP port `3000` must be allowed in the OS firewall.
-- If running on a cloud VM, the cloud firewall/security group must allow inbound TCP `3000` from approved colleague IPs.
-- Do not open port `3001` publicly; keep the Claude bridge bound to localhost.
+```text
+User browser -> HTTPS reverse proxy -> Next.js UI -> 127.0.0.1:3001 bridge -> Claude Code CLI
+```
 
-## Security requirement before wider use
+The reverse proxy should terminate TLS, enforce authentication, apply IP allow-listing or VPN-only access, and disable response buffering for Server-Sent Events.
 
-Before sharing beyond a trusted POC group, add:
+## Network Controls
 
-- Authentication.
-- HTTPS/TLS.
-- IP allow-listing or VPN-only access.
-- Request logging and audit retention.
-- A reverse proxy such as NGINX/Caddy/IIS in front of Next.js.
+- Allow inbound TCP `443` to the reverse proxy from approved networks.
+- For demo mode only, allow inbound TCP `3000` from approved colleague IPs.
+- Do not allow inbound TCP `3001`; the bridge must remain bound to localhost.
+- If running on a cloud VM, enforce the same restrictions in both the OS firewall and the cloud security group.
+- Keep Jira, BigQuery, GitHub, and Claude credentials on the host; remote users should not receive direct access to MCP servers.
+
+## Operational Checks
+
+Before sharing access:
+
+- Confirm the bridge health endpoint is healthy from the host: `http://127.0.0.1:3001/health`.
+- Confirm the UI can reach the bridge through the Next.js API routes.
+- Verify long-running SQL generation streams through the proxy without buffering or timeout.
+- Confirm logs include enough request context for audit and incident review.
+- Confirm no secrets, tokens, or bridge URLs are exposed in browser-visible configuration.
+
+## Production Requirements
+
+Do not use public remote access until these are implemented:
+
+- Authentication for every user.
+- HTTPS/TLS with managed certificates.
+- IP allow-listing or VPN-only network access.
+- Process supervision and restart policy for both bridge and UI.
+- Structured request logging with retention.
+- Reverse proxy hardening, including request size limits and SSE-compatible timeouts.
+- Documented owner, rollback process, and incident contact.

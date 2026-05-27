@@ -19,8 +19,6 @@ export async function POST(request: NextRequest) {
 
     return forwardToBridge(body);
   } catch (error) {
-    console.error('[POST /api/chat] Error:', error);
-
     if (error instanceof SyntaxError) {
       return new Response(JSON.stringify({ error: 'Invalid JSON body' }), {
         status: 400,

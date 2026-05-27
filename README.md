@@ -1,10 +1,10 @@
 # SQL Curator
 
-A BigQuery SQL generation tool. Takes ambiguous Jira stories, uploaded files, or free-text requirements and produces production-grade BigQuery SQL with a structured Source-to-Target Map (STM), validated through a layered bridge-owned gate before surfacing to the UI.
+A BigQuery SQL generation tool. Takes ambiguous Jira stories, uploaded files, or free-text requirements and produces production-grade BigQuery SQL with a structured Source-to-Target Map (STM) and bridge-owned validation warnings.
 
 **Scope is SQL generation only.** Legacy-SQL conversion, dialect translation, and rewrite tasks are out of scope and refused. Designed to keep moving when inputs are incomplete: every inference is recorded with evidence and confidence; user feedback (clarification answers, regeneration reasons) becomes context for the next pass.
 
-For day-to-day operations, see [`RUNBOOK.md`](RUNBOOK.md). For Claude's operating contract, see [`skills/sqlforge/SKILL.md`](skills/sqlforge/SKILL.md).
+For day-to-day operations, see [`RUNBOOK.md`](RUNBOOK.md). For Claude's operating contract, see [`skills/generator.md`](skills/generator.md).
 
 ---
 
@@ -21,7 +21,7 @@ Browser ── HTTPS ──▶ Next.js (port 3000) ──▶ claude-bridge (port
                                          MCP servers: Jira • BigQuery • GitHub
 ```
 
-The browser never talks to MCP servers directly. Every external action flows through `claude-bridge`, which orchestrates Claude CLI sessions, parses their stream-json output, and enforces the validation gate before releasing SQL.
+The browser never talks to MCP servers directly. Every external action flows through `claude-bridge`, which orchestrates Claude CLI sessions, parses their stream-json output, emits SQL artifacts, and surfaces bridge-owned validation results.
 
 ---
 
@@ -47,7 +47,7 @@ mini-services/claude-bridge/      Node.js HTTP/SSE bridge
   tests/                          node --test unit tests
   .env.example                    Every env var the bridge consumes
 
-skills/sqlforge/SKILL.md          Claude's operating contract (loaded into
+skills/generator.md          Claude's operating contract (loaded into
                                   every session). Specifies the canonical
                                   S01–S13 stage SOP, output contract, and
                                   the bridge validation layers.
@@ -58,17 +58,17 @@ RUNBOOK.md                        Operational runbook (deployment + ops)
 
 ---
 
-## Validation gate (the bit that decides what reaches the UI)
+## Validation
 
-The bridge gates every SQL generation through three layers. **All three must pass** for SQL to surface.
+The bridge validates every SQL generation through three layers. SQL is emitted to the UI whenever Claude returns a fenced SQL block. If validation fails or cannot complete, the UI shows a warning and Jira completion is skipped.
 
 | Layer | What it checks | Verdict source | LLM in verdict? |
 |---|---|---|---|
-| **L1 — Executional** | Does the SQL parse and resolve in BigQuery? | Raw `tool_result.is_error` from the dry-run MCP call, read by the bridge | No |
+| **L1 — Executional** | Did an observed BigQuery dry-run/read return an error? | Raw `tool_result.is_error` from any main-session dry-run/read call; `not_run` when S11 stays logical-only | No |
 | **L2 — Structural** | Does the SQL implement what the STM declared? Target column coverage, source table coverage, target object match, output schema vs STM types | Mechanical SQL ↔ STM comparison in [`structural-checks.js`](mini-services/claude-bridge/structural-checks.js) | No |
-| **L3 — Semantic** | Does the STM cover every acceptance criterion in the requirements? | Fresh Claude session given only requirements + STM (no SQL, no chat history) | Yes — cold and narrowly scoped |
+| **L3 — Semantic/Repair** | Does the STM cover every acceptance criterion, are confidence claims sound, and does SQL implement the STM? | Fresh Claude session given requirements, SQL, STM, inferences, decisions, and scope (no chat history or tools) | Yes — cold, independent, and allowed to return corrected SQL |
 
-Claude's prose `validation.sqlChecks.status` is discarded and overwritten by the bridge-derived verdict before the UI sees it. The skill explicitly tells Claude this so it cannot try to influence the gate by claiming success.
+Claude's prose `validation.sqlChecks.status` is discarded and overwritten by the bridge-derived verdict before the UI sees it. The skill explicitly tells Claude this so it cannot influence validation by claiming success.
 
 ---
 
@@ -130,7 +130,7 @@ JSON snapshot of counters, gauges, and bucketed-histogram timings. Notable serie
 
 - `requests_total{endpoint,taskType}` — incoming volume
 - `request_duration_ms{endpoint}` — histogram, buckets 50ms → 5min
-- `gate_layer_result{layer,status}` — L1 / L2 / L3 pass-fail-warning counts
+- `validation_layer_result{layer,status}` — L1 / L2 / L3 pass-fail-warning counts
 - `claude_sessions_aborted{reason}` — `client_disconnect` / `pre_aborted`
 - `auto_retry_attempts{reason}`, `idempotency_collision{state}`, `stream_buffer_overflow{accumulator}`
 
@@ -151,10 +151,9 @@ See [`.env.example`](mini-services/claude-bridge/.env.example) for the complete 
 | `CLAUDE_MAX_TURNS` | `25` | Tool-use turns per main session |
 | `CLAUDE_TIMEOUT_MS` | `1200000` | Wall-clock cap per session (20 min) |
 | `CLAUDE_MAX_CONCURRENT` | `3` | Concurrent in-flight bridge requests |
-| `SQL_CURATOR_REQUIRE_DRYRUN_PASS` | `true` | Strict gate; refuses SQL unless all layers pass |
 | `SQL_CURATOR_L3_COVERAGE_CHECK` | `true` | Enable the L3 cold semantic-coverage session |
 | `SQL_CURATOR_L3_TIMEOUT_MS` | `45000` | Cold-session timeout (ms) |
-| `SQL_CURATOR_DEFER_JIRA_COMPLETION` | `true` | Two-pass Jira ordering — comment + transition run after gate clears |
+| `SQL_CURATOR_DEFER_JIRA_COMPLETION` | `true` | Two-pass Jira ordering — comment + transition run after validation passes |
 | `SQL_CURATOR_LOG_LEVEL` | `info` | `trace` / `debug` / `info` / `warn` / `error` / `fatal` |
 | `SQL_CURATOR_LOG_PRETTY` | `false` | Switch to `pino-pretty` single-line output for dev |
 | `SQL_CURATOR_MAX_STREAM_BUFFER_BYTES` | `8388608` | Bounded buffer on stream accumulators (overflow aborts the session) |

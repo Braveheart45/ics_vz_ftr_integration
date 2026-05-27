@@ -124,8 +124,8 @@ export function ChatPanel() {
             sessionId,
             taskType,
             // Preserve Jira + context across clarification roundtrips so the
-            // bridge keeps treating the run as Jira-backed (otherwise the
-            // post-gate Jira follow-up pass is skipped).
+            // bridge keeps treating the run as Jira-backed so the validation-
+            // gated Jira follow-up pass remains eligible.
             jiraInput: jiraInput.project.trim() ? jiraInput : undefined,
             bqProjectId: bqProjectInput.projectId.trim(),
             bqDatasetId: bqProjectInput.datasetId.trim(),

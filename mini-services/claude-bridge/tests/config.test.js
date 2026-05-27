@@ -8,9 +8,9 @@ const { loadConfig } = require('../config');
 test('loadConfig accepts an empty env and uses defaults', () => {
   const cfg = loadConfig({});
   assert.equal(cfg.port, 3001);
-  assert.equal(cfg.claude.maxTurns, 25);
+  assert.equal(cfg.claude.maxTurns, 50);
   assert.equal(cfg.claude.maxConcurrent, 3);
-  assert.equal(cfg.features.requireSqlChecksPass, true);
+  assert.equal(cfg.features.offlineDryRunEnabled, false);
   assert.equal(cfg.logLevel, 'info');
 });
 
@@ -35,11 +35,6 @@ test('loadConfig accepts valid log levels', () => {
   }
 });
 
-test('loadConfig parses comma-separated jira write tools override', () => {
-  const cfg = loadConfig({ SQL_CURATOR_JIRA_WRITE_TOOLS: 'tool_a, tool_b ,tool_c' });
-  assert.deepEqual([...cfg.jiraWriteTools], ['tool_a', 'tool_b', 'tool_c']);
-});
-
 test('loadConfig returns frozen objects', () => {
   const cfg = loadConfig({});
   assert.throws(() => { cfg.port = 4000; });
@@ -47,10 +42,11 @@ test('loadConfig returns frozen objects', () => {
 });
 
 test('loadConfig parses boolean feature flags', () => {
-  const enabled = loadConfig({ SQL_CURATOR_REQUIRE_DRYRUN_PASS: 'true' });
-  assert.equal(enabled.features.requireSqlChecksPass, true);
-  const disabled = loadConfig({ SQL_CURATOR_REQUIRE_DRYRUN_PASS: 'false' });
-  assert.equal(disabled.features.requireSqlChecksPass, false);
+  const enabled = loadConfig({ SQL_CURATOR_ENABLE_OFFLINE_DRY_RUN: 'true' });
+  assert.equal(enabled.features.offlineDryRunEnabled, true);
+
+  const disabled = loadConfig({ SQL_CURATOR_ENABLE_OFFLINE_DRY_RUN: 'false' });
+  assert.equal(disabled.features.offlineDryRunEnabled, false);
 });
 
 test('loadConfig aggregates multiple errors at once', () => {

@@ -2,7 +2,7 @@
 
 Deployment, configuration, monitoring, and incident response for the SQL Curator bridge + frontend.
 
-For application architecture and HTTP API reference, see [`README.md`](README.md). For Claude's operating contract, see [`skills/sqlforge/SKILL.md`](skills/sqlforge/SKILL.md).
+For application architecture and HTTP API reference, see [`README.md`](README.md). For Claude's operating contract, see [`skills/generator.md`](skills/generator.md).
 
 ---
 
@@ -36,19 +36,19 @@ mini-services/claude-bridge/
   tool-helpers.js             MCP tool_result canonicaliser
   output-parsers.js           SQL / STM / clarification extractors
   structural-checks.js        L2 SQL ↔ STM checks (LLM-free)
-  tests/                      node --test suite (87 unit tests)
+  tests/                      node --test suite
   .env.example                Annotated env-var reference
 ```
 
-### 1.3 Validation gate
+### 1.3 Validation
 
-Every SQL run passes through three bridge-owned layers. All three must pass for SQL to surface.
+Every SQL run passes through three bridge-owned layers. SQL is emitted to the UI whenever Claude returns a fenced SQL block. If validation fails or cannot complete, the UI shows a warning and Jira completion is skipped.
 
 | Layer | What it checks | Verdict source | LLM in verdict? |
 |---|---|---|---|
-| **L1 Executional** | Does the SQL parse and resolve in BigQuery? | Raw `tool_result.is_error` from the dry-run MCP call | No |
+| **L1 Executional** | Did an observed BigQuery dry-run/read return an error? | Raw `tool_result.is_error` from any main-session dry-run/read call; `not_run` when S11 stays logical-only | No |
 | **L2 Structural** | Does the SQL implement what the STM declared? | Mechanical SQL ↔ STM comparison | No |
-| **L3 Semantic** | Does the STM cover every acceptance criterion? | Fresh Claude session given only requirements + STM (no SQL, no history) | Yes — cold, narrowly scoped |
+| **L3 Semantic/Repair** | Does the STM cover requirements, are confidence claims sound, and does SQL implement the STM? | Fresh Claude session given requirements, SQL, STM, inferences, decisions, and scope (no chat history or tools) | Yes — cold, independent, and allowed to return corrected SQL |
 
 Claude's prose `validation.sqlChecks.status` is **discarded** and overwritten by the bridge-derived verdict before the UI sees it.
 
@@ -104,9 +104,8 @@ The complete annotated reference lives in [`mini-services/claude-bridge/.env.exa
 | `MAX_HISTORY_MESSAGES` | `20` | 1–500 | Recent client messages forwarded to Claude |
 | `SQL_CURATOR_MAX_REQUEST_BODY_BYTES` | `2097152` | 1024–67108864 | Max accepted request body (2 MB) |
 | `SQL_CURATOR_MAX_STREAM_BUFFER_BYTES` | `8388608` | 65536–268435456 | Bounded buffer on stream accumulators (8 MB) |
-| `SQL_CURATOR_REQUIRE_DRYRUN_PASS` | `true` | boolean | Strict gate; SQL withheld unless all layers pass |
 | `SQL_CURATOR_L3_COVERAGE_CHECK` | `true` | boolean | Enable the L3 cold semantic-coverage session |
-| `SQL_CURATOR_L3_TIMEOUT_MS` | `45000` | 5000–600000 | Cold-session timeout |
+| `SQL_CURATOR_L3_TIMEOUT_MS` | `45000` | 5000–600000 | L3 cold-session timeout |
 | `SQL_CURATOR_DEFER_JIRA_COMPLETION` | `true` | boolean | Two-pass Jira ordering |
 | `SQL_CURATOR_JIRA_COMPLETION_TIMEOUT_MS` | `120000` | 5000–1800000 | Jira follow-up pass timeout |
 | `SQL_CURATOR_JIRA_WRITE_TOOLS` | (built-in list) | comma list | Override the Jira write tools blocked during main pass |
@@ -121,7 +120,7 @@ MCP servers are configured in `~/.claude.json`, not in this repo. Claude CLI own
 | MCP | Required tools | Permissions |
 |---|---|---|
 | Jira | `getJiraIssue`, `searchJiraIssuesUsingJql`, `addCommentToJiraIssue`, `transitionJiraIssue` | Read + comment + transition on target project |
-| BigQuery | `list_dataset_ids`, `list_table_ids`, `get_table_info`, `execute_sql_readonly` | `jobs.create` in dry-run mode on target project |
+| BigQuery | `list_table_ids`, `get_table_info`, `execute_sql_readonly` | `jobs.create` in dry-run mode on target project |
 | GitHub | PR / push tools | Only used in `github_deploy` mode |
 
 ---
@@ -214,7 +213,7 @@ Key series:
 | `requests_total` | counter | `endpoint`, `taskType` | Incoming volume |
 | `requests_succeeded` / `requests_failed` / `requests_completed_with_issue` | counter | `endpoint` | Outcome breakdown |
 | `request_duration_ms` | histogram | `endpoint` | End-to-end latency, buckets 50ms → 5min |
-| `gate_layer_result` | counter | `layer` (L1/L2/L3), `status` | Per-layer verdict counts |
+| `validation_layer_result` | counter | `layer` (L1/L2/L3), `status` | Per-layer verdict counts |
 | `claude_sessions_spawned` | counter | `kind` (primary/retry) | Process spawn volume |
 | `claude_sessions_active` | gauge | — | In-flight Claude processes |
 | `claude_sessions_aborted` | counter | `reason` (client_disconnect / pre_aborted) | Disconnect tracking |
@@ -318,7 +317,7 @@ The Activity Feed will show which layer blocked. Most common causes:
 
 - **L2 fail** — STM declares a target column that's missing from the SQL's outermost SELECT, or a source table the SQL doesn't reference. Fix the STM or the SQL; regenerate.
 - **L3 fail** — STM is missing rows for an acceptance criterion. The cold session lists missing criteria in its activity card. Add the missing rows.
-- **L1 not_run** — Claude did not invoke the dry-run tool. The skill says it must; check `journalctl` for the Claude session output to see why it skipped.
+- **L1 not_run** — Claude followed the logical-only S11 path and did not invoke a BigQuery dry-run/read tool. SQL should still surface with a validation warning if a fenced SQL block exists.
 
 ### 9.4 `degraded_capacity` on `/health`
 All concurrency slots taken. Either:
@@ -372,7 +371,7 @@ Active SSE streams are closed during the restart; clients receive `done {success
 
 ## 11. Updating the skill
 
-[`skills/sqlforge/SKILL.md`](skills/sqlforge/SKILL.md) is the operating contract Claude reads at the start of every session. Changes take effect on the next request — no bridge restart needed.
+[`skills/generator.md`](skills/generator.md) is the operating contract Claude reads at the start of every session. Changes take effect on the next request — no bridge restart needed.
 
 For pid-level isolation between old and new contract behaviour during a rollout (e.g. a major SKILL change), restart the bridge after the file is in place.
 

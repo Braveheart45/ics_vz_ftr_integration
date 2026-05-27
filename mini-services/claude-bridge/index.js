@@ -64,7 +64,7 @@ const {
   extractClarification,
   detectTerminalRunIssue,
 } = require('./output-parsers');
-const { runStructuralChecks } = require('./structural-checks');
+const { decideSqlRelease } = require('./release-policy');
 
 // ── Structured error responses ───────────────────────────────
 // All error paths funnel through one helper so the wire format stays
@@ -132,10 +132,6 @@ const MAX_CONCURRENT = CONFIG.claude.maxConcurrent;
 const MAX_REQUEST_BODY_BYTES = CONFIG.server.maxRequestBodyBytes;
 const MAX_STREAM_BUFFER_BYTES = CONFIG.server.maxStreamBufferBytes;
 const OFFLINE_DRY_RUN_ENABLED = CONFIG.features.offlineDryRunEnabled;
-const REQUIRE_SQLCHECKS_PASS = CONFIG.features.requireSqlChecksPass;
-const JIRA_WRITE_TOOLS = CONFIG.jiraWriteTools;
-const JIRA_COMPLETION_ENABLED = CONFIG.features.jiraCompletionEnabled;
-const JIRA_COMPLETION_TIMEOUT_MS = CONFIG.timeouts.jiraCompletionMs;
 const BQ_PROJECT_ID_PATTERN = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
 const BQ_DATASET_ID_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,1023}$/;
 
@@ -190,7 +186,7 @@ setInterval(() => {
   const now = Date.now();
   for (const [id, session] of sessions) {
     if (now - session.lastActivity > 30 * 60 * 1000) {
-      console.log(`  [cleanup] Session ${id.slice(0, 8)} expired`);
+      rootLogger.debug('Expired idle session', { sessionId: id.slice(0, 8) });
       sessions.delete(id);
     }
   }
@@ -221,7 +217,7 @@ function findClaude() {
       });
       if (result.status === 0) {
         claudePath = cmd;
-        console.log(`  [init] Found Claude CLI: ${cmd}`);
+        rootLogger.debug('Found Claude CLI', { command: cmd });
         return cmd;
       }
     } catch { /* not found */ }
@@ -237,7 +233,7 @@ function findClaude() {
   for (const p of paths) {
     if (fs.existsSync(p)) {
       claudePath = p;
-      console.log(`  [init] Found Claude CLI at: ${p}`);
+      rootLogger.debug('Found Claude CLI', { path: p });
       return p;
     }
   }
@@ -248,13 +244,31 @@ function findClaude() {
 // ── Prompt Builder ────────────────────────────────────────────
 
 function loadSqlForgeSkill() {
-  const skillPath = path.resolve(__dirname, '..', '..', 'skills', 'sqlforge', 'SKILL.md');
+  const skillPath = path.resolve(__dirname, '..', '..', 'skills', 'generator.md');
   try {
     return fs.readFileSync(skillPath, 'utf8').trim();
   } catch (err) {
-    console.error(`  [skill] Unable to load SQL Curator skill: ${err.message}`);
+    rootLogger.error('Unable to load SQL Curator skill', { error: err.message });
     return '';
   }
+}
+
+function loadValidatorSkill() {
+  const skillPath = path.resolve(__dirname, '..', '..', 'skills', 'validator.md');
+  try {
+    return fs.readFileSync(skillPath, 'utf8').trim();
+  } catch (err) {
+    rootLogger.error('Unable to load validator skill', { error: err.message });
+    return '';
+  }
+}
+
+const VALIDATOR_SKILL_TEXT = loadValidatorSkill();
+const VALIDATOR_SKILL_LOADED = VALIDATOR_SKILL_TEXT.length > 0;
+if (VALIDATOR_SKILL_LOADED) {
+  rootLogger.info('Validator skill inlined into main prompt', { bytes: VALIDATOR_SKILL_TEXT.length });
+} else {
+  rootLogger.warn('Validator skill could not be loaded; S11 will fall back to generator self-audit only');
 }
 
 function buildThinShellPrompt(request) {
@@ -272,6 +286,19 @@ Follow the SQL Curator skill instructions below as the stable operating contract
 
 ${sqlForgeSkill || 'SQL Curator skill file was not available; use the hard constraints and workflow rules in this prompt.'}
 
+## MCP Connector Status — READ THIS FIRST
+Attempt to use MCP connectors directly. Do NOT call authenticate, complete_authentication, or ToolSearch tools. Do NOT check connector status before proceeding.
+
+**If any MCP tool returns an authentication message, access-denied error, or a response saying "run /mcp" or "visit a URL to authenticate":**
+- Record the failure in the activity log only (do not surface it to the user)
+- Do NOT offer authentication options or /mcp instructions in any clarification
+- Do NOT mention OAuth, authentication, or connector setup to the user — these are internal technical details the user cannot act on inside SQL Curator
+- Treat the connector as unavailable and proceed with all other available context immediately
+
+**If Jira is unavailable and story content is unknown AND no free text or files were supplied**: emit ONE intake activity block with status "blocked", then immediately emit [CLARIFY] asking ONE business-focused question (e.g. "Briefly describe what SCRUM-33 should compute — one sentence is enough"). Do not mention Jira or auth failures in the question. Do NOT proceed to schema, STM, SQL generation, or any other stage. This is a hard stop — wait for the user's answer on the next turn.
+
+**If Jira is unavailable but free text OR uploaded files exist**: proceed with those as the primary requirement source. Do not block.
+
 ## Hard Constraints
 - The UI and Next.js routes must use zero external APIs and must not contain business workflow logic.
 - Claude Code owns all workflow decisions and must use the enabled native Jira and BigQuery MCP connectors when Jira or BigQuery lookup is needed.
@@ -282,22 +309,41 @@ ${sqlForgeSkill || 'SQL Curator skill file was not available; use the hard const
 - Supported uploaded file context is plain text only: TXT, CSV, JSON, MD, and SQL. Do not assume PDF, DOCX, XLSX, or PPTX extraction exists in this POC.
 - The BigQuery project ID and dataset ID are mandatory. Treat them as the target BigQuery scope for generated object names, schema reconciliation, inference, and dry-run validation.
 - Do not infer, scan, or reconcile schemas outside the mandatory target dataset. If needed details are absent from that dataset, ask a focused clarification instead of crawling other datasets.
-- If a Jira reference is supplied, fetch the story details with the native Jira MCP connector and merge the story description, acceptance criteria, comments, and relevant linked context into the session context before deciding whether to generate or clarify.
-- After SQL is generated successfully for a supplied Jira story, use the native Jira MCP connector to post a Jira comment and transition that Jira issue to In Progress. The comment must summarize SQL generation, STM status, validation result, dry-run result when available, output artifact summary, assumptions, and unresolved warnings. If either Jira action is unavailable, include the exact failure as validation feedback instead of failing SQL generation.
-- If Jira fetching fails or the connector is unavailable, ask the user to provide the story details instead of guessing.
+- If a Jira reference is supplied, attempt to fetch the story details with the native Jira MCP connector. If the fetch succeeds, merge description, acceptance criteria, comments, and linked context into the session before proceeding. If the fetch fails AND there is no free text and no uploaded files, this is a HARD BLOCK — emit a blocked intake card + [CLARIFY] asking for one business sentence and STOP. Do not invent acceptance criteria, do not infer source tables from naming convention, do not generate SQL from imagined schemas.
+- If a Jira reference is supplied and the fetch fails BUT free text or uploaded files exist, proceed using those as the requirement source.
+- For Jira-backed generation, perform the Jira comment + transition write inline at S13 (end of the same pass), after S11 validator persona has approved the SQL and S12 dry-run has completed. Do NOT call Jira write tools before S13.
+- **Schema is mandatory, not optional.** Before generating SQL, you MUST call BigQuery MCP (list_table_ids + get_table_info on at most 3 candidates) inside the supplied project.dataset. Naming-convention guesses ("source objects inferred from conventional naming") are NOT acceptable. If list_table_ids returns no candidates matching extracted terms, emit [CLARIFY] asking the user to name the source tables — do not fabricate them.
+- **S12 dry-run is mandatory before [SQL_READY].** You MUST call execute_sql_readonly against the final SQL. If it fails, attempt up to 3 fixes. Skipping the dry-run (leaving sqlChecks.status = "pending" or "not_run") is a contract violation. The bridge will release the SQL with a loud warning when this happens.
+- **S13 Jira write is mandatory for Jira-backed runs.** Once S12 dry-run completes (pass or fail), you MUST call addCommentToJiraIssue and transitionJiraIssue. Skipping these or "deferring to next pass" is a contract violation.
 - Do not deploy to GitHub during SQL generation. GitHub deployment is allowed only when Requested Mode is github_deploy, which is triggered by the user's deployment icon action.
 - Emit concise visible activity checkpoints as you work: what you fetched, analyzed, investigated, inferred, assumed, validated, dry-run errors/fixes, and Jira/GitHub actions. Do not expose private chain-of-thought; provide architect-readable rationale, findings, and decisions.
 
-## Workflow You Own
-1. Intake and consolidate every supplied source into one requirement context.
-2. Identify the target use case: generate SQL, convert SQL, or clarify requirement.
-3. Detect schema, mappings, business logic, target tables, joins, filters, and transformation rules from the provided context.
-4. If context is sufficient, generate production-oriented BigQuery SQL immediately.
-5. Validate the generated SQL against only the supplied source inputs: mapping completeness, stated business rules, obvious schema/logic gaps, and syntax-level reasonableness.
-6. Infer missing non-critical details when confidence is 90% or higher.
-7. If confidence is below 90% for a critical detail, ask one focused clarification and stop.
-8. After a clarification answer, resume from the unresolved stage only. Do not restart at Intake unless the original context is invalid or missing.
-9. If the user selects one of your clarification options or explicitly approves a proposed mapping, treat that answer as authorization to continue with that mapping. Do not ask the same clarification again. Continue to STM construction, SQL generation, dry-run validation when possible, and return warnings for any remaining low-confidence business semantics.
+## Vague-Input Handling (mandatory)
+"Vague" is allowed only when there is *some* business signal to be vague about (a Jira description, a free-text sentence, an uploaded file). It is NOT a license to invent everything from a bare Jira key.
+
+**Tier-1 gate (intake — see S01):** if Jira fails and there is no free text and no files, you have ZERO business context. STOP. Emit a blocked intake card + [CLARIFY] asking for one sentence. Do not pretend that "telecom_analytics is the dataset name therefore this must be a monthly broadband usage view" is acceptable inference — it is not.
+
+**Tier-2 gate (per-decision confidence — S06):** once you have at least one business sentence, apply the per-decision confidence gate:
+- **≥ 90 % confidence**: auto-approve, record the inference with evidence, continue.
+- **50–89 % confidence**: surface a focused clarification — one question, 2–5 ranked options — and pause only for that specific gap.
+- **< 50 % confidence**: ask a direct open question for that specific gap, allow free text.
+
+Ask about ONE gap at a time — the single highest-impact unknown. Do not ask for everything before starting. Per-decision evidence must be *specific*: a Jira phrase, a column name, a live BigQuery table you actually inspected — never "convention" or "dataset name implies".
+
+## Workflow You Own (linear, single pass)
+1. **Intake (S01):** attempt Jira fetch (if reference supplied). If Jira fetch fails: (a) if free text or uploaded files are present, proceed with those as the requirement source; (b) if NO free text and NO uploaded files exist, emit ONE activity block with status "blocked" stating the Jira failure and missing context, then immediately emit [CLARIFY] asking for at least one sentence of business context — do NOT proceed to analysis or schema with zero business context. After intake completes (Jira fetched, or alternative context confirmed), emit ONE activity block with status "completed" summarising sources received, Jira key/status, fetch outcome, and classification. Never emit intake summary cards with status "running".
+2. **Analyze (S02–S03):** extract or infer use-case, acceptance criteria, grain, filters, and date logic from whatever is available. Record every inference with evidence and confidence. Emit activity blocks.
+3. **Schema (S04–S05):** work strictly inside the supplied project.dataset. Do NOT list datasets — the user already supplied the dataset boundary. Call list_table_ids once for that dataset, score candidates, inspect at most 3 schemas. Emit activity blocks.
+4. **Confidence Gate (S06):** if any critical dimension is < 50% confident, emit [CLARIFY] for that specific gap — one question with 2–5 options — and stop.
+5. **STM (S07) + Logical Plan (S07a):** build STM and emit the logical plan decision block.
+6. **Design (S08) + Generate SQL (S09):** every expression in the outermost SELECT (or the final CTE) must carry an explicit AS alias that exactly matches the STM targetColumn — arithmetic, CASE WHEN, functions, and aggregates included. Omitting the alias will fail validation even if the SQL is otherwise correct. Emit activity blocks.
+7. **Generator self-audit (S10):** quick logical sanity check. Emit one validation-type activity block.
+8. **Validator persona (S11):** switch mindset and read the "S11 Validator Persona" section below. Run the three tasks (Requirements Coverage, Inference Soundness, SQL ↔ STM Alignment). If a concrete mismatch is found, CORRECT THE SQL INLINE — the corrected SQL replaces the SQL from S09 and becomes THE final sql block. Emit validation-type activity blocks for findings and corrections.
+9. **Dry-run (S12):** call execute_sql_readonly against the (possibly corrected) SQL. Up to 3 fix-and-retry attempts on failure. Record the result in validation.sqlChecks.status.
+10. **Jira completion (S13):** for Jira-backed runs, post a summary comment and transition the issue to In Progress now. Failures are recorded as warnings in validation.jiraTransition, not blockers. For non-Jira runs, set jiraTransition.status to "not_run".
+11. **Ready (S14):** emit ready activity block, then final SQL/STM/validation fenced blocks, then [SQL_READY].
+12. After a clarification answer, resume from the unresolved stage. Do not restart at Intake.
+13. Once the user confirms an option or approves an inference, treat it as final — do not re-ask.
 
 ## GitHub Deployment Mode
 When Requested Mode is github_deploy:
@@ -337,9 +383,9 @@ When SQL is ready, include:
 5. A required STM artifact in a \`\`\`stm fenced JSON block using:
 {"title":"STM Title","description":"Brief description","rows":[{"sourceField":"field_name","sourceTable":"table_name","sourceType":"data_type","targetColumn":"column_name","targetTable":"table_name","targetType":"data_type","transformation":"TRANSFORM","businessRule":"RULE","notes":"NOTE"}]}
 6. A required validation artifact in a \`\`\`validation fenced JSON block using:
-{"activityLog":[{"stage":"analysis","type":"observation","status":"completed","title":"Intake classified","summary":"What Claude observed or decided","details":["Optional extra detail"],"confidence":95,"evidence":["Optional evidence"],"timestamp":0,"source":"claude"}],"activityDetails":["Summarize what Claude fetched, analyzed, found, reconciled, inferred, assumed, validated, and updated."],"inferences":["List each material inference or auto-approved assumption used for STM/SQL generation, including confidence when useful. If none, say no material inference was required."],"requirementCoverage":{"status":"pass","summary":"What requirement coverage was validated","checks":["Concrete check"]},"stmCompleteness":{"status":"pass","summary":"What STM completeness was validated","checks":["Concrete check"]},"schemaReconciliation":{"status":"pass","summary":"What schema reconciliation was validated","checks":["Concrete check"]},"sqlChecks":{"status":"pass","summary":"What SQL checks were validated","checks":["Concrete check"]},"jiraTransition":{"status":"pass","summary":"Jira comment and transition result, or reason not applicable","checks":["Jira comment posted or failure reason","Jira transition result or failure reason"]}}
+{"activityLog":[{"stage":"analysis","type":"observation","status":"completed","title":"Intake classified","summary":"What Claude observed or decided","details":["Optional extra detail"],"confidence":95,"evidence":["Optional evidence"],"timestamp":0,"source":"claude"}],"activityDetails":["Summarize what Claude fetched, analyzed, found, reconciled, inferred, assumed, validated, and updated."],"inferences":[{"claim":"One material inference or assumption made during this run","confidence":85,"evidence":"Exact phrase, column name, or requirement sentence that drove this inference"}],"requirementCoverage":{"status":"pass","summary":"What requirement coverage was validated","checks":["Concrete check"]},"stmCompleteness":{"status":"pass","summary":"What STM completeness was validated","checks":["Concrete check"]},"schemaReconciliation":{"status":"pass","summary":"What schema reconciliation was validated","checks":["Concrete check"]},"sqlChecks":{"status":"pass","summary":"What SQL checks were validated","checks":["Concrete check"]},"jiraTransition":{"status":"pass","summary":"Jira comment and transition result, or reason not applicable","checks":["Jira comment posted or failure reason","Jira transition result or failure reason"]}}
 Use status values only from pass, warning, fail, and not_run.
-For activityLog status use only running, completed, warning, failed, blocked, or pending. For activityLog type use only observation, inference, decision, validation, error, or artifact. NEVER use type "tool" — tool invocations are not user-facing; describe what was learned from a tool result, not that a tool was called. For activityLog source use only claude, bridge, jira, bigquery, github, offline, or fallback.
+For activityLog status use only running, completed, warning, failed, blocked, or pending. For activityLog type use only summary, observation, inference, decision, validation, error, or artifact. NEVER use type "tool" — tool invocations are not user-facing; describe what was learned from a tool result, not that a tool was called. For activityLog source use only claude, bridge, jira, bigquery, github, offline, or fallback.
 
 LIVE ACTIVITY FEED — INLINE BLOCKS REQUIRED
 The Activity pane streams from inline \`\`\`activity blocks you emit during the run. The bridge scans your streaming text for these blocks and forwards each as an SSE event the moment its closing fence arrives. If you only emit findings in the final validation block, the user sees nothing happening until the end. Stream them as you go.
@@ -353,6 +399,7 @@ Required inline format — emit one of these after each significant step (intake
 Hard requirements:
 - At least one inline activity block at the close of each stage you actually executed (intake, analysis, schema_resolution, sql_generation, validation, ready).
 - Within a stage, additional blocks for material findings, inferences, decisions, validations, dry-run attempts, fixes, retries, and unresolved errors.
+- Use type "summary" for compact run digests that combine confidence, key assumptions, and key decisions. Keep these short; they feed the Summary chip so users do not have to mine long activity logs.
 - Each entry states the FINDING, not the action. Bad: "Called getJiraIssue." Good: "SCRUM-21 acceptance criteria require top-N ranking, monthly grain, total broadband usage = downlink+uplink."
 - type "inference" and type "decision" entries MUST include evidence[].
 - type "error" entries state the diagnosis and what was done about it (fix, retry, surfaced for clarification).
@@ -361,28 +408,26 @@ Hard requirements:
 - Forbidden phrases in title/summary: "Calling", "Invoking", "Tool", "MCP", "Running tool", "Fetching via", "BigQuery MCP", "Jira MCP".
 - The final validation.activityLog[] field is now optional. If present, it should be a deduplicated summary only.
 
-STRICT JIRA STEP ORDERING (Jira-backed runs only) — TOOL-GATED
-The bridge enforces ordering at the tool level. During THIS main pass the Jira WRITE tools are disallowed: addCommentToJiraIssue, transitionJiraIssue, editJiraIssue, createJiraIssue, addWorklogToJiraIssue, createIssueLink. They will not appear in your toolset and will fail if attempted. Do not try to call them. Jira READ tools (getJiraIssue, searchJiraIssuesUsingJql) remain available.
+## Tool Availability (single pass — all tools enabled throughout)
+The bridge runs ONE linear Claude session. There is no follow-up pass. All native MCP tools — BigQuery (execute_sql_readonly and schema reads), Jira (read AND write), and GitHub — are available to you for the entire pass. Use them in the order prescribed by the workflow above:
+- BigQuery reads: S05 schema reconciliation.
+- BigQuery execute_sql_readonly: S12 dry-run only — never before S11 completes.
+- Jira reads (getJiraIssue, searchJiraIssuesUsingJql): S01 intake.
+- Jira writes (addCommentToJiraIssue, transitionJiraIssue, etc.): S13 only — never before S12 completes successfully.
+- GitHub writes: only when Requested Mode is github_deploy.
 
-After your main pass produces SQL/STM/validation and the strict gate passes (sqlChecks.status === "pass"), the bridge spawns a follow-up Claude pass that resumes this same conversation with Jira write tools re-enabled. That follow-up will post the comment and transition the issue automatically.
-
-Your main pass sequence:
-1. Intake: fetch Jira story (read). Emit activity block.
-2. Analyze: extract acceptance criteria. Emit activity blocks.
-3. Schema: reconcile within target dataset. Emit activity blocks.
-4. Generate: build STM, write SQL. Emit activity blocks.
-5. Validate: run BigQuery dry run, retry up to 3x on failure. Emit one activity block per attempt + fix.
-6. Ready: emit ready activity block, then final SQL/STM/validation fenced blocks, then [SQL_READY].
-
-In the validation JSON block, set jiraTransition.status to "not_run" with summary "Deferred to bridge follow-up pass after gate clears." — the bridge's follow-up will overwrite the user-facing result with the real outcome.
-
-Activity details must include dry-run attempts, dry-run errors, diagnosis, fixes applied, retry outcomes, and unresolved failures whenever those occur.
-
-STRICT GATE: The bridge withholds generated SQL from the UI unless validation.sqlChecks.status is exactly "pass". If you emit [SQL_READY] with sqlChecks.status set to warning/fail/not_run, the user sees the run as failed and no SQL is released. Always run a BigQuery dry run (and the diagnose-fix-retry loop up to 3 times) before declaring readiness. If a dry run is impossible (no MCP, permission denied), set sqlChecks.status to "warning" and surface a clarification rather than emitting [SQL_READY].
-7. End with [SQL_READY].
+## Validation Release Policy
+The bridge surfaces the SQL block to the UI whenever a fenced \`\`\`sql block is present in your final output, regardless of validation status — but it will show a warning banner if validation.stmCompleteness.status, validation.requirementCoverage.status, or validation.sqlChecks.status is "warning" or "fail". The SQL block you emit at S14 must be the **final corrected version** (post-S11 corrections, post-S12 dry-run fixes).
 
 ## BigQuery SQL Rules
-Generate BigQuery SQL with appropriate source tables, target object, column mappings, joins, filters, aggregations, business rules, null handling, casting, date logic, aliases, and useful comments. Prefer CTEs, SAFE_DIVIDE, COUNTIF, QUALIFY for window filters, COALESCE/IFNULL for nullable inputs, and clear aliases.`;
+Generate BigQuery SQL with appropriate source tables, target object, column mappings, joins, filters, aggregations, business rules, null handling, casting, date logic, aliases, and useful comments. Prefer CTEs, SAFE_DIVIDE, COUNTIF, QUALIFY for window filters, COALESCE/IFNULL for nullable inputs, and clear aliases.
+
+---
+
+## S11 Validator Persona — Read carefully when you enter S11
+When you reach S11, switch your mindset to the validator described below. Same session, separate persona. Inspect SQL ↔ STM ↔ inferences ↔ activity log. Correct the SQL inline if and only if a concrete mismatch is identified. The corrected SQL becomes THE final \`\`\`sql block you emit at S14. Do not emit a separate \`\`\`verdict block — instead, fold the validator's findings into the validation JSON block: requirementCoverage from Task 1, inference soundness notes into activityDetails, sqlAlignment outcome into stmCompleteness.
+
+${VALIDATOR_SKILL_TEXT || '(Validator skill was not available at bridge startup — perform an enhanced version of S10 self-audit as the validator step.)'}`;
 
   const parts = [instructions];
   parts.push(`## Requested Mode\n${taskType || 'sql_generation'}`);
@@ -454,7 +499,7 @@ function extractValidationSummary(content, request = {}) {
         activityDetails,
       });
     } catch (err) {
-      console.error(`  [validation] Failed to parse validation JSON: ${err.message}`);
+      rootLogger.warn('Failed to parse validation JSON', { error: err.message });
     }
   }
 
@@ -685,6 +730,15 @@ function normalizeValidationStatus(status) {
   return ['pass', 'warning', 'fail', 'not_run'].includes(normalized) ? normalized : 'warning';
 }
 
+function combineValidationStatuses(statuses) {
+  const values = (statuses || []).map(normalizeValidationStatus).filter(Boolean);
+  if (values.length === 0) return 'not_run';
+  if (values.includes('fail')) return 'fail';
+  if (values.includes('warning')) return 'warning';
+  if (values.includes('not_run')) return 'not_run';
+  return 'pass';
+}
+
 function normalizeValidationSection(section, fallbackSummary, fallbackChecks = [], fallbackStatus = 'warning') {
   const value = section && typeof section === 'object' ? section : {};
   const checks = Array.isArray(value.checks)
@@ -760,10 +814,15 @@ function normalizeValidationSummary(summary, context = {}) {
     : Array.isArray(source.activity_log)
       ? source.activity_log
       : [];
+  // Preserve structured inference objects {claim, confidence, evidence} from the
+  // validation JSON block. Falling back to prose-extracted strings only when the
+  // validation block produced no structured inferences.
   const sourceInferences = Array.isArray(source.inferences)
-    ? source.inferences.map((item) => String(item)).filter(Boolean)
+    ? source.inferences.filter((item) => item !== null && item !== undefined)
     : [];
-  const inferences = [...sourceInferences, ...(context.inferences || [])].slice(0, 20);
+  const inferences = sourceInferences.length > 0
+    ? sourceInferences.slice(0, 20)
+    : (context.inferences || []).slice(0, 20);
   const sourceActivityDetails = Array.isArray(source.activityDetails)
     ? source.activityDetails.map((item) => String(item)).filter(Boolean)
     : [];
@@ -1317,7 +1376,7 @@ function processInlineActivities(text, fromOffset, onEvent, seen) {
     try {
       parsed = JSON.parse(raw);
     } catch (err) {
-      console.error(`  [activity] Failed to parse inline block: ${err.message}`);
+      rootLogger.warn('Failed to parse inline activity block', { error: err.message });
       continue;
     }
     onEvent({
@@ -1327,6 +1386,13 @@ function processInlineActivities(text, fromOffset, onEvent, seen) {
         source: parsed.source || 'claude',
       }),
     });
+    // Also tick the pipeline matrix forward when Claude crosses into a new
+    // stage. Tool-call ticks cover schema and intake; inline activity blocks
+    // are the only signal for sql_generation and validation transitions.
+    const PIPELINE_ADVANCE_STAGES = new Set(['analysis', 'schema_resolution', 'sql_generation', 'validation', 'ready']);
+    if (parsed.stage && PIPELINE_ADVANCE_STAGES.has(parsed.stage)) {
+      onEvent({ type: 'status', stage: parsed.stage, message: parsed.title || '' });
+    }
   }
   return advanceTo;
 }
@@ -1461,13 +1527,25 @@ async function runClaude(prompt, sessionId, request, onEvent, ctx = {}, retryCou
   const pendingToolCalls = new Map();
   // Jira-ordering tracking: has a successful BigQuery dry-run completed yet?
   const orderingState = { dryRunPassed: false, jiraCommentBeforeDryRun: false };
-  // Bridge-owned gate verdict source: every BigQuery dry-run/execute MCP call
+  // Bridge-owned validation verdict source: every BigQuery dry-run/execute MCP call
   // that completes is captured here from the raw tool_result. The verdict is
   // derived from the LAST attempt's is_error flag — Claude's prose verdict
   // (validation.sqlChecks.status) is discarded. This is the only path that
-  // guarantees the gate decision is free of LLM interpretation bias while
+  // guarantees the validation decision is free of LLM interpretation bias while
   // remaining inside the MCP-only constraint.
   const dryRunAttempts = [];
+
+  // Shared context passed to parseClaudeLine for every stream-json line. We
+  // mutate this object to thread state across event-handler invocations
+  // (e.g. `lastResult.subtype` is written when the `result` event arrives
+  // so the close handler can label the auto-retry card with the real cause).
+  const parseCtx = {
+    toolCalls,
+    pendingToolCalls,
+    orderingState,
+    dryRunAttempts,
+    lastResult: null,
+  };
 
   // Forward-declared so cleanup() can detach the listener; assigned later.
   let abortHandlerRef = null;
@@ -1518,14 +1596,9 @@ async function runClaude(prompt, sessionId, request, onEvent, ctx = {}, retryCou
       '--dangerously-skip-permissions', // headless mode: auto-approve all MCP tool calls
     ];
 
-    // Two-pass Jira ordering: block Jira write tools during the main run so
-    // Claude cannot post the comment or transition the issue before the
-    // strict validation gate clears. We perform a follow-up Claude pass with
-    // these tools allowed once the gate passes.
-    const isJiraBacked = !!(request.jiraInput?.project && request.jiraInput?.storyNumber);
-    if (JIRA_COMPLETION_ENABLED && isJiraBacked && JIRA_WRITE_TOOLS.length > 0) {
-      args.push('--disallowedTools', JIRA_WRITE_TOOLS.join(','));
-    }
+    // Linear single-pass: all MCP tools (BigQuery read+execute, Jira read+write,
+    // GitHub) are available throughout. The skill controls ordering — Jira writes
+    // happen only at S13, after S11 validator + S12 dry-run complete.
 
     // Resume conversation if we have a conversation ID
     if (session.conversationId) {
@@ -1590,20 +1663,14 @@ async function runClaude(prompt, sessionId, request, onEvent, ctx = {}, retryCou
 
       for (const line of lines) {
         if (!line.trim()) continue;
-        // Log each stream-json line with a timestamp so we can see whether
-        // Claude itself is emitting progressively or batching.
+        // Debug-only stream-json trace for diagnosing Claude streaming.
         let snippet = line;
         try {
           const j = JSON.parse(line);
           snippet = `${j.type}${j.message?.role ? `/${j.message.role}` : ''}${j.message?.content ? ` blocks=${(j.message.content || []).map((c) => c.type).join(',')}` : ''}${j.subtype ? ` subtype=${j.subtype}` : ''}`;
         } catch { /* keep raw */ }
-        console.log(`  [claude +${String(Date.now() - claudeStartMs).padStart(5, ' ')}ms] ${snippet}`);
-        const result = parseClaudeLine(line, onEvent, {
-          toolCalls,
-          pendingToolCalls,
-          orderingState,
-          dryRunAttempts,
-        });
+        log.debug('Claude stream event', { elapsedMs: Date.now() - claudeStartMs, event: snippet });
+        const result = parseClaudeLine(line, onEvent, parseCtx);
         if (result?.delta) {
           // Emit message_start once before the first streaming chunk
           if (!hasStartedMessage) {
@@ -1664,8 +1731,16 @@ async function runClaude(prompt, sessionId, request, onEvent, ctx = {}, retryCou
 
       // Determine if this was a clarification request — only honour [CLARIFY] sentinel
       const isClarify = finalText.includes('[CLARIFY]');
-      const sqlBlock  = extractSql(finalText);
+      let sqlBlock    = extractSql(finalText);
       const hasSqlBlock = !!sqlBlock;
+
+      log.debug('Final text diagnostic', {
+        chars: finalText.length,
+        hasSqlBlock,
+        isClarify,
+        hasSqlReady: finalText.includes('[SQL_READY]'),
+        snippet: finalText.slice(0, 800).replace(/\n/g, '\\n'),
+      });
 
       // Emit final message (replaces/corrects any streaming bubble on the
       // client). Strip out the inline ```activity blocks: they were already
@@ -1676,154 +1751,47 @@ async function runClaude(prompt, sessionId, request, onEvent, ctx = {}, retryCou
       }
 
       const isGithubDeploy = request.taskType === 'github_deploy';
+      const isJiraBackedRun = !!(request.jiraInput?.project && request.jiraInput?.storyNumber);
 
-      // ── Layered validation gate ─────────────────────────────
-      // The gate is a conjunction of three layers; SQL surfaces only when
-      // ALL pass. The bridge derives every verdict deterministically (L1
-      // from raw tool_result is_error, L2 from mechanical SQL/STM parsing,
-      // L3 from a cold LLM coverage check). Claude's self-reported prose
-      // verdicts are discarded and overwritten in the validation summary.
-      //
-      //   L1 — BigQuery dry-run via MCP (executional correctness)
-      //   L2 — SQL ↔ STM structural alignment (no LLM)
-      //   L3 — STM ↔ requirements coverage (cold LLM, no SQL, no history)
+      // Advance the pipeline matrix immediately so the UI shows "Validate"
+      // while we parse Claude's emitted validation block — not after.
+      if (hasSqlBlock && !isGithubDeploy && !isClarify) {
+        onEvent({ type: 'status', stage: 'sql_generation', status: 'completed', message: 'BigQuery SQL generated.' });
+        onEvent({ type: 'status', stage: 'validation', status: 'active', message: 'Parsing validator + dry-run + Jira results...' });
+      }
+
+      // ── Single-source validation (linear in-session flow) ───
+      // S11 (validator persona) + S12 (dry-run) + S13 (Jira) all run inside
+      // Claude's main pass. We trust Claude's emitted `validation` JSON block
+      // as the authoritative source. The bridge does not overwrite or re-judge
+      // any of the sub-statuses.
       let validationSummary = null;
-      let sqlChecksStatus = 'not_run';
-      let gatePassed = false;
-      let gateBlockedBy = null;
-      let bridgeVerdict = null;
       if (hasSqlBlock) {
         validationSummary = extractValidationSummary(finalText, request);
-        const stmBlock = (finalText.match(/```stm\s*\n([\s\S]*?)```/i) || [])[1] || null;
-
-        if (!isGithubDeploy && !isClarify) {
-          // ── L1: BigQuery dry-run via MCP ───────────────────
-          const lastAttempt = dryRunAttempts.length > 0 ? dryRunAttempts[dryRunAttempts.length - 1] : null;
-
-          if (!lastAttempt) {
-            bridgeVerdict = {
-              status: 'not_run',
-              summary: 'BigQuery dry-run tool was not invoked during the run. Strict mode requires a dry-run via MCP before SQL surfaces.',
-              checks: [
-                'Expected at least one execute_sql_readonly (or equivalent dry-run) tool call from the main session.',
-                'Claude must invoke the dry-run tool so the bridge can read the authoritative result.',
-              ],
-            };
-          } else if (lastAttempt.isError) {
-            const errSnippet = (lastAttempt.resultText || '').replace(/\s+/g, ' ').trim().slice(0, 1000);
-            bridgeVerdict = {
-              status: 'fail',
-              summary: 'BigQuery dry-run returned an error via MCP.',
-              checks: [
-                `Tool: ${lastAttempt.toolName}`,
-                errSnippet || 'No error text returned.',
-                `Dry-run attempts in this run: ${dryRunAttempts.length}.`,
-              ],
-            };
-          } else {
-            bridgeVerdict = {
-              status: 'pass',
-              summary: 'BigQuery dry-run completed successfully via MCP.',
-              checks: [
-                `Tool: ${lastAttempt.toolName}`,
-                'Tool result reported no error (is_error=false).',
-                `Dry-run attempts in this run: ${dryRunAttempts.length}.`,
-              ],
-            };
-          }
-          if (validationSummary) validationSummary.sqlChecks = bridgeVerdict;
-          sqlChecksStatus = bridgeVerdict.status;
-          metrics.incr('gate_layer_result', { layer: 'L1', status: bridgeVerdict.status });
-
-          onEvent({
-            type: 'activity_event',
-            event: makeActivityEvent({
-              stage: 'validation',
-              type: 'validation',
-              status: bridgeVerdict.status === 'pass' ? 'completed'
-                : bridgeVerdict.status === 'fail' ? 'failed' : 'pending',
-              title: `BigQuery Dry-Run — ${bridgeVerdict.status}`,
-              summary: bridgeVerdict.summary,
-              evidence: bridgeVerdict.checks,
-              source: 'bigquery',
-            }),
-          });
-
-          // ── L2: SQL ↔ STM structural alignment (only when L1 passed) ──
-          let structuralVerdict = null;
-          if (bridgeVerdict.status === 'pass') {
-            structuralVerdict = runStructuralChecks(
-              sqlBlock,
-              stmBlock,
-              lastAttempt?.resultText
-            );
-            if (validationSummary) {
-              validationSummary.stmCompleteness = {
-                status: structuralVerdict.status,
-                summary: structuralVerdict.summary,
-                checks: structuralVerdict.checks.map((c) => `${c.name}: ${c.status} — ${c.detail}`),
-              };
-            }
-            metrics.incr('gate_layer_result', { layer: 'L2', status: structuralVerdict.status });
-            onEvent({
-              type: 'activity_event',
-              event: makeActivityEvent({
-                stage: 'validation',
-                type: 'validation',
-                status: structuralVerdict.status === 'pass' ? 'completed'
-                  : structuralVerdict.status === 'fail' ? 'failed' : 'warning',
-                title: `SQL ↔ STM Structural Check — ${structuralVerdict.status}`,
-                summary: structuralVerdict.summary,
-                evidence: structuralVerdict.checks.map((c) => `${c.name}: ${c.detail}`),
-                source: 'bridge',
-              }),
-            });
-          }
-
-          // ── L3: STM ↔ requirements coverage (only when L1+L2 passed) ──
-          let coverageVerdict = null;
-          if (bridgeVerdict.status === 'pass' && structuralVerdict?.status === 'pass') {
-            coverageVerdict = await runRequirementsCoverageCheck(stmBlock, request, onEvent, { log: log.child({ phase: 'l3-coverage' }) });
-            if (coverageVerdict && validationSummary) {
-              validationSummary.requirementCoverage = {
-                status: coverageVerdict.status,
-                summary: coverageVerdict.summary,
-                checks: coverageVerdict.checks,
-              };
-            }
-            if (coverageVerdict) {
-              metrics.incr('gate_layer_result', { layer: 'L3', status: coverageVerdict.status });
-            }
-          }
-
-          // Composite gate decision: every layer must be pass for SQL to
-          // surface. Any fail/not_run blocks; warnings are allowed through
-          // but flagged in the validation summary the UI shows.
-          const layerStatuses = [
-            { layer: 'L1 dry-run', status: bridgeVerdict.status },
-            { layer: 'L2 structural', status: structuralVerdict?.status || (bridgeVerdict.status === 'pass' ? 'not_run' : 'skipped') },
-            { layer: 'L3 coverage', status: coverageVerdict?.status || (bridgeVerdict.status === 'pass' && structuralVerdict?.status === 'pass' ? 'not_run' : 'skipped') },
-          ];
-          const blockingLayer = layerStatuses.find((l) => l.status === 'fail' || l.status === 'not_run');
-          if (blockingLayer) {
-            sqlChecksStatus = blockingLayer.status;
-            gateBlockedBy = `${blockingLayer.layer}: ${blockingLayer.status}`;
-          } else {
-            sqlChecksStatus = 'pass';
-          }
-        } else {
-          // GitHub deploy or clarification paths bypass all layers.
-          sqlChecksStatus = validationSummary?.sqlChecks?.status || 'not_run';
-        }
-
-        if (REQUIRE_SQLCHECKS_PASS) {
-          gatePassed = sqlChecksStatus === 'pass';
-          if (!gatePassed && !gateBlockedBy) gateBlockedBy = sqlChecksStatus;
-        } else {
-          gatePassed = true;
+        if (validationSummary) {
+          metrics.incr('validation_status', { source: 'stm', status: validationSummary?.stmCompleteness?.status || 'unknown' });
+          metrics.incr('validation_status', { source: 'requirements', status: validationSummary?.requirementCoverage?.status || 'unknown' });
+          metrics.incr('validation_status', { source: 'sql_dryrun', status: validationSummary?.sqlChecks?.status || 'unknown' });
+          metrics.incr('validation_status', { source: 'jira', status: validationSummary?.jiraTransition?.status || 'unknown' });
         }
       }
-      const surfacesSql = hasSqlBlock && gatePassed;
+
+      // Take the worst status across the validator + dry-run sub-sections.
+      const validationStatus = combineValidationStatuses([
+        validationSummary?.stmCompleteness?.status,
+        validationSummary?.requirementCoverage?.status,
+        validationSummary?.sqlChecks?.status,
+      ]);
+
+      const releaseDecision = decideSqlRelease({
+        hasSqlBlock,
+        isClarify,
+        isGithubDeploy,
+        validationStatus,
+      });
+      const surfacesSql = releaseDecision.surfacesSql;
+      const validationPassed = releaseDecision.validationPassed;
+      const sqlReleaseWarning = releaseDecision.warning;
 
       if (surfacesSql) {
         const ticketKey = request.jiraInput?.project && request.jiraInput?.storyNumber
@@ -1831,7 +1799,7 @@ async function runClaude(prompt, sessionId, request, onEvent, ctx = {}, retryCou
           : 'standalone';
         onEvent({ type: 'status', stage: 'analysis', status: 'completed', message: 'Requirement analysis completed.' });
         onEvent({ type: 'status', stage: 'schema_resolution', status: 'completed', message: 'Schema and mapping context resolved.' });
-        onEvent({ type: 'sql', sql: sqlBlock, fileName: `sql_curator_${ticketKey}_${Date.now()}.sql` });
+        onEvent({ type: 'sql', sql: sqlBlock, fileName: `sql_curator_${ticketKey}_${Date.now()}.sql`, warning: sqlReleaseWarning || undefined });
         onEvent({
           type: 'activity_event',
           event: makeActivityEvent({
@@ -1844,56 +1812,32 @@ async function runClaude(prompt, sessionId, request, onEvent, ctx = {}, retryCou
             source: 'claude',
           }),
         });
-        onEvent({ type: 'status', stage: 'sql_generation', status: 'completed', message: 'BigQuery SQL generated by Claude Code.' });
+        if (sqlReleaseWarning) {
+          onEvent({
+            type: 'activity_event',
+            event: makeActivityEvent({
+              stage: 'validation',
+              type: 'validation',
+              status: 'warning',
+              title: 'SQL Released With Validation Warning',
+              summary: sqlReleaseWarning,
+              details: [
+                `STM ↔ SQL alignment: ${validationSummary?.stmCompleteness?.status || 'unknown'}`,
+                `Requirement coverage: ${validationSummary?.requirementCoverage?.status || 'unknown'}`,
+                `Dry-run: ${validationSummary?.sqlChecks?.status || 'unknown'}`,
+              ],
+              source: 'bridge',
+            }),
+          });
+        }
         onEvent({ type: 'validation_summary', summary: validationSummary });
-        onEvent({ type: 'status', stage: 'validation', status: 'completed', message: 'Validated against requirements, mappings, and available schema context.' });
-      }
-
-      // ── Gated rejection: SQL existed but dry-run/validation did not pass ──
-      if (hasSqlBlock && !gatePassed && !isClarify && !isGithubDeploy) {
-        const gateReason = (() => {
-          switch (gateBlockedBy) {
-            case 'fail':
-              return 'BigQuery dry run or SQL validation reported a failure.';
-            case 'warning':
-              return 'BigQuery dry run or SQL validation reported warnings; strict mode requires `pass`.';
-            case 'not_run':
-              return 'BigQuery dry run was not attempted. Strict mode requires a successful dry run before SQL is released.';
-            default:
-              return `SQL checks returned status "${gateBlockedBy}"; strict mode requires "pass".`;
-          }
-        })();
-        const checks = Array.isArray(validationSummary?.sqlChecks?.checks)
-          ? validationSummary.sqlChecks.checks.slice(0, 5)
-          : [];
         onEvent({
           type: 'status',
           stage: 'validation',
-          status: 'failed',
-          message: 'SQL withheld: validation did not pass.',
-        });
-        onEvent({ type: 'validation_summary', summary: validationSummary });
-        onEvent({
-          type: 'activity_event',
-          event: makeActivityEvent({
-            stage: 'validation',
-            type: 'error',
-            status: 'failed',
-            title: 'SQL Withheld — Validation Did Not Pass',
-            summary: gateReason,
-            details: [
-              'Strict mode is enabled (SQL_CURATOR_REQUIRE_DRYRUN_PASS).',
-              'Generated SQL was not released to the UI because validation.sqlChecks.status is not "pass".',
-              ...checks,
-            ],
-            evidence: checks,
-            source: 'bridge',
-          }),
-        });
-        onEvent({
-          type: 'error',
-          message: 'SQL was generated but withheld because validation did not pass.',
-          hint: `${gateReason} Resubmit so Claude can diagnose and retry the dry run; see Activity Feed for findings.`,
+          status: 'completed',
+          message: validationPassed
+            ? 'Validated against requirements, mappings, and available schema context.'
+            : 'SQL released with validation warnings. Review validation summary before use.',
         });
       }
 
@@ -1901,24 +1845,45 @@ async function runClaude(prompt, sessionId, request, onEvent, ctx = {}, retryCou
         const terminalIssue = detectTerminalRunIssue(finalText);
 
         // ── Auto-retry: request the SQL block explicitly once ──
-        // Only retry for missing_sql (not rate limits), only on the first attempt,
-        // and only when we have a resumable conversation ID.
-        if (terminalIssue.kind === 'missing_sql' && retryCount === 0 && session.conversationId) {
-          log.warn('Auto-retry: no SQL block on first pass, resuming conversation', { conversationId: session.conversationId.slice(0, 12) });
-          metrics.incr('auto_retry_attempts', { reason: 'missing_sql' });
+        // Fires whenever the first pass returned no SQL block (missing_sql).
+        // If the session has a conversation ID we resume via --resume so Claude
+        // has full context. Without one (e.g. the CLI result event omitted
+        // session_id) we re-run fresh but include the prior assistant text in
+        // the message history so the retry still has context.
+        if (terminalIssue.kind === 'missing_sql' && retryCount === 0) {
+          const resumeId = session.conversationId;
+          const lastResult = parseCtx.lastResult || {};
+          const subtype = lastResult.subtype || 'unknown';
+          const numTurns = lastResult.numTurns;
+          log.warn('Auto-retry: no SQL block on first pass', {
+            resumeId: resumeId ? resumeId.slice(0, 12) : 'none (fresh)',
+            resultSubtype: subtype,
+            numTurns,
+          });
+          metrics.incr('auto_retry_attempts', { reason: subtype === 'error_max_turns' ? 'max_turns' : 'missing_sql' });
+          const reasonText = subtype === 'error_max_turns'
+            ? `First pass hit the ${numTurns ?? '?'}-turn budget before emitting the final SQL block. Consider raising CLAUDE_MAX_TURNS if this keeps happening.`
+            : subtype === 'error_during_execution'
+              ? 'First pass exited mid-execution before emitting the final SQL block.'
+              : 'First pass returned no fenced SQL block.';
           onEvent({
             type: 'activity_event',
             event: makeActivityEvent({
               stage: 'validation',
               type: 'observation',
-              status: 'running',
-              title: 'Auto-Retry: Requesting SQL Block',
-              summary: 'Claude completed the run without a fenced SQL block. Resuming the same conversation to request the SQL artifact explicitly.',
+              status: 'completed',
+              title: 'Auto-Retry Triggered',
+              summary: `${reasonText} ${resumeId ? 'Resumed the same conversation' : 'Re-ran with explicit SQL formatting instructions'} and asked Claude to emit the artifact. New cards below are from the retry.`,
+              evidence: [
+                `result subtype: ${subtype}`,
+                numTurns != null ? `turns used: ${numTurns}` : null,
+                `retry mode: ${resumeId ? 'resume' : 'fresh'}`,
+              ].filter(Boolean),
               source: 'bridge',
             }),
           });
 
-          const retryUserMsg = 'Your previous response did not include a fenced ```sql``` code block. Please re-emit the complete generated SQL now inside a properly fenced ```sql\n...\n``` block, followed by the STM and validation blocks if not already present, then end with [SQL_READY].';
+          const retryUserMsg = 'IMPORTANT: Your previous response did not include a fenced ```sql``` code block, which is required. The MCP tools (BigQuery, Jira, GitHub) are already authenticated — do not try to authenticate them. Do not call ToolSearch. Emit the complete SQL now inside a properly fenced ```sql\\n...\\n``` block, followed by the STM (```stm) and validation (```validation) blocks, then end with [SQL_READY]. If you did not generate SQL yet, generate it now from the requirements and schema already in context.';
           const retryRequest = {
             ...request,
             messages: [
@@ -2023,32 +1988,16 @@ async function runClaude(prompt, sessionId, request, onEvent, ctx = {}, retryCou
         onEvent({ type: 'clarification', ...clarification });
       }
 
-      // ── Two-pass Jira completion ────────────────────────────
-      // Now that the strict gate has cleared, run the Jira comment +
-      // transition as a focused follow-up. This guarantees they happen AFTER
-      // SQL/STM/validation, not before — regardless of how Claude reasoned
-      // during the main pass (which had Jira write tools disallowed).
-      const isJiraBackedRun = !!(request.jiraInput?.project && request.jiraInput?.storyNumber);
-      if (surfacesSql && isJiraBackedRun && JIRA_COMPLETION_ENABLED) {
-        try {
-          await runJiraCompletion(sessionId, session, request, validationSummary, onEvent);
-        } catch (followUpErr) {
-          onEvent({
-            type: 'activity_event',
-            event: makeActivityEvent({
-              stage: 'validation',
-              type: 'error',
-              status: 'warning',
-              title: 'Jira Follow-up Did Not Complete',
-              summary: `Bridge-led Jira completion pass failed: ${followUpErr.message}. The SQL is still valid; rerun if the Jira issue needs an update.`,
-              source: 'bridge',
-            }),
-          });
-        }
-      }
+      // Jira completion now happens inline in Claude's main pass at S13.
+      // No follow-up pass — the validation summary reports the final Jira result.
 
       if (surfacesSql) {
-        onEvent({ type: 'status', stage: 'ready', status: 'completed', message: 'SQL ready for review and copy.' });
+        onEvent({
+          type: 'status',
+          stage: 'ready',
+          status: 'completed',
+          message: validationPassed ? 'SQL ready for review and copy.' : 'SQL ready for review with validation warnings.',
+        });
       }
 
       onEvent({ type: 'done', success: surfacesSql || (isGithubDeploy && code === 0 && !isClarify) });
@@ -2070,425 +2019,6 @@ async function runClaude(prompt, sessionId, request, onEvent, ctx = {}, retryCou
   });
 }
 
-// ── L3: Cold requirements-coverage check ─────────────────────
-// Spawns a fresh Claude session given ONLY the raw requirement text and the
-// STM JSON. No SQL, no chat history, no MCP tools. Asks the narrow question:
-// does the STM cover every acceptance criterion in the requirements?
-//
-// This is the irreducibly interpretive layer — there is no deterministic way
-// to check "does the STM capture intent". The cold session minimises bias by
-// having no generation history and no SQL to anchor on.
-//
-// Returns: { status, summary, checks[] } or null on timeout/parse failure.
-
-const L3_TIMEOUT_MS = CONFIG.timeouts.l3CoverageMs;
-const L3_ENABLED = CONFIG.features.l3CoverageCheckEnabled;
-
-function buildRequirementsText(request) {
-  const parts = [];
-  if (request?.jiraInput?.project && request?.jiraInput?.storyNumber) {
-    parts.push(`Jira reference: ${request.jiraInput.project}-${request.jiraInput.storyNumber}`);
-  }
-  // The main session prompt already echoed the Jira description into chat
-  // history; the bridge does not re-fetch Jira here to keep this purely text.
-  if (request?.contextText && request.contextText.trim()) {
-    parts.push('Free-text requirements:\n' + request.contextText.trim());
-  }
-  if (Array.isArray(request?.uploadedFiles)) {
-    for (const f of request.uploadedFiles) {
-      if (f?.content && typeof f.content === 'string') {
-        parts.push(`Uploaded file (${f.name || 'unnamed'}):\n${f.content.slice(0, 8000)}`);
-      }
-    }
-  }
-  // Include the most recent user message as the canonical ask.
-  if (Array.isArray(request?.messages)) {
-    const lastUser = [...request.messages].reverse().find((m) => m?.role === 'user');
-    if (lastUser?.content) {
-      parts.push('User request:\n' + String(lastUser.content).slice(0, 8000));
-    }
-  }
-  return parts.join('\n\n').trim();
-}
-
-async function runRequirementsCoverageCheck(stmBlock, request, onEvent, ctx = {}) {
-  const log = ctx.log || rootLogger.child({ component: 'l3-coverage' });
-  if (!L3_ENABLED) return null;
-  if (!stmBlock) return null;
-
-  const requirementsText = buildRequirementsText(request);
-  if (!requirementsText) {
-    // Nothing to validate against. Honest non-result.
-    return {
-      status: 'not_run',
-      summary: 'No textual requirements were provided (no Jira description, free text, or uploaded files); STM ↔ requirements coverage could not be assessed.',
-      checks: ['Provide a Jira story, free text, or uploaded file content to enable this layer.'],
-    };
-  }
-
-  const claudeBin = findClaude();
-  if (!claudeBin) return null;
-
-  const prompt = [
-    'You are an independent requirements analyst. You have no knowledge of any SQL or schema.',
-    'Your only job: judge whether the STM (Source-to-Target Map) below covers every acceptance criterion in the requirements.',
-    '',
-    '── REQUIREMENTS ─────────────────────────────────────────',
-    requirementsText,
-    '',
-    '── STM JSON ─────────────────────────────────────────────',
-    '```json',
-    stmBlock,
-    '```',
-    '',
-    '── YOUR TASK ───────────────────────────────────────────',
-    '1. Identify each distinct acceptance criterion or business rule in the requirements (filters, joins, grain, aggregations, ranking, date logic, output columns).',
-    '2. For each criterion, decide whether the STM has at least one row that addresses it (via transformation, businessRule, target column, or source field).',
-    '3. Be strict but fair — do not invent criteria the user did not state, and do not flag STM rows just because they look unrelated to one criterion (they may serve another).',
-    '4. Return ONLY a fenced ```coverage``` JSON block. No other prose.',
-    '',
-    'Required JSON shape:',
-    '```',
-    '{"status":"pass"|"warning"|"fail","summary":"one sentence","criteria":[{"text":"...","covered":true|false|"partial","evidenceStmRow":"sourceField→targetColumn or N/A"}]}',
-    '```',
-    '',
-    'Status rules — apply strictly:',
-    '- "pass"    : every criterion is covered=true',
-    '- "warning" : at least one is covered="partial", none are covered=false',
-    '- "fail"    : at least one criterion is covered=false',
-  ].join('\n');
-
-  onEvent({
-    type: 'activity_event',
-    event: makeActivityEvent({
-      stage: 'validation',
-      type: 'validation',
-      status: 'running',
-      title: 'Requirements Coverage — Cold Review',
-      summary: 'A fresh Claude session (no SQL, no chat history, no tools) is checking whether the STM covers every acceptance criterion in the requirements.',
-      source: 'bridge',
-    }),
-  });
-
-  const result = await new Promise((resolve) => {
-    const proc = spawn(claudeBin, [
-      '-p', '-',
-      '--output-format', 'stream-json',
-      '--max-turns', '2',
-      '--verbose',
-      '--dangerously-skip-permissions',
-    ], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: buildClaudeEnv(),
-    });
-    spawnedProcs.add(proc);
-
-    let buffer = '';
-    let fullText = '';
-    let accDelta = '';
-
-    const timer = setTimeout(() => {
-      log.warn('L3 cold session timed out', { timeoutMs: L3_TIMEOUT_MS });
-      metrics.incr('l3_coverage_outcome', { result: 'timeout' });
-      killChildProcess(proc);
-      spawnedProcs.delete(proc);
-      resolve(null);
-    }, L3_TIMEOUT_MS);
-
-    proc.stdout.on('data', (chunk) => {
-      buffer += chunk.toString('utf-8');
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const parsed = JSON.parse(line);
-          if (parsed.type === 'assistant' && Array.isArray(parsed.message?.content)) {
-            for (const block of parsed.message.content) {
-              if (block.type === 'text') fullText += block.text || '';
-            }
-          }
-          if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
-            accDelta += parsed.delta.text;
-          }
-        } catch { /* skip */ }
-      }
-    });
-
-    proc.stderr.on('data', (chunk) => {
-      const text = chunk.toString('utf-8').trim();
-      if (text) log.warn('L3 stderr', { text });
-    });
-
-    proc.stdin.write(prompt, (err) => {
-      if (err) {
-        clearTimeout(timer);
-        killChildProcess(proc);
-        spawnedProcs.delete(proc);
-        resolve(null);
-        return;
-      }
-      proc.stdin.end();
-    });
-
-    proc.on('close', () => {
-      clearTimeout(timer);
-      spawnedProcs.delete(proc);
-      const output = fullText || accDelta;
-      const m = output.match(/```coverage\s*\n([\s\S]*?)```/i);
-      if (!m) {
-        log.warn('L3 returned no coverage block');
-        metrics.incr('l3_coverage_outcome', { result: 'no_block' });
-        resolve(null);
-        return;
-      }
-      try {
-        const parsed = JSON.parse(m[1].trim());
-        resolve(parsed);
-      } catch (parseErr) {
-        log.warn('L3 JSON parse error', { error: parseErr.message });
-        metrics.incr('l3_coverage_outcome', { result: 'parse_error' });
-        resolve(null);
-      }
-    });
-
-    proc.on('error', () => {
-      clearTimeout(timer);
-      spawnedProcs.delete(proc);
-      resolve(null);
-    });
-  });
-
-  if (!result || typeof result !== 'object' || !result.status) {
-    onEvent({
-      type: 'activity_event',
-      event: makeActivityEvent({
-        stage: 'validation',
-        type: 'error',
-        status: 'warning',
-        title: 'Requirements Coverage — No Result',
-        summary: 'The cold coverage session timed out or returned an unparsable result. Treating coverage as not_run.',
-        source: 'bridge',
-      }),
-    });
-    return {
-      status: 'not_run',
-      summary: 'Requirements coverage check did not return a structured verdict.',
-      checks: ['Cold L3 session timed out or returned malformed JSON.'],
-    };
-  }
-
-  const status = normalizeValidationStatus(result.status);
-  const criteria = Array.isArray(result.criteria) ? result.criteria : [];
-  const missing = criteria.filter((c) => c.covered === false).map((c) => c.text);
-  const partial = criteria.filter((c) => c.covered === 'partial' || c.covered === 'warning').map((c) => c.text);
-  const checks = [
-    `Criteria identified: ${criteria.length}.`,
-    `Fully covered: ${criteria.filter((c) => c.covered === true).length}.`,
-    partial.length ? `Partially covered: ${partial.length} — ${partial.slice(0, 5).join('; ')}.` : null,
-    missing.length ? `Missing coverage: ${missing.slice(0, 5).join('; ')}.` : null,
-  ].filter(Boolean);
-
-  onEvent({
-    type: 'activity_event',
-    event: makeActivityEvent({
-      stage: 'validation',
-      type: 'validation',
-      status: status === 'pass' ? 'completed' : status === 'fail' ? 'failed' : 'warning',
-      title: `Requirements Coverage — ${status}`,
-      summary: result.summary || `Cold review of STM ↔ requirements: ${status}.`,
-      evidence: checks,
-      source: 'bridge',
-    }),
-  });
-
-  return {
-    status,
-    summary: result.summary || 'Requirements coverage assessed by cold review.',
-    checks,
-  };
-}
-
-// ── Two-pass Jira completion ──────────────────────────────────
-// Spawned after the main run's strict gate passes. Resumes the same Claude
-// conversation with Jira write tools allowed and instructs Claude to do ONLY
-// the Jira comment + transition. Surfaces tool-derived activity cards via
-// the same semantic translator the main pass uses.
-
-async function runJiraCompletion(sessionId, session, request, validationSummary, onEvent) {
-  const claudeBin = findClaude();
-  if (!claudeBin) throw new Error('Claude CLI not found for Jira completion');
-
-  const issueKey = `${request.jiraInput.project}-${request.jiraInput.storyNumber}`;
-  const stmSummary = validationSummary?.stmCompleteness?.summary || 'STM completeness verified.';
-  const reqSummary = validationSummary?.requirementCoverage?.summary || 'Requirement coverage verified.';
-  const sqlSummary = validationSummary?.sqlChecks?.summary || 'BigQuery dry run passed.';
-  const inferences = Array.isArray(validationSummary?.inferences) ? validationSummary.inferences.slice(0, 6) : [];
-  const runMarker = `SQL Curator run ${new Date().toISOString()}`;
-
-  const prompt = `The SQL Curator generation pass for ${issueKey} just finished successfully. The bridge withheld this conversation's Jira write tools so the comment could not be posted prematurely. Those tools are now re-enabled. Perform the Jira completion step now.
-
-This is a NEW run. The Jira issue may already contain comments from prior runs — IGNORE THEM. You MUST post a fresh comment for this run regardless of what is already on the issue.
-
-Authoritative context from the run that just completed:
-- STM status: ${stmSummary}
-- Requirement coverage: ${reqSummary}
-- BigQuery validation: ${sqlSummary}
-- Run marker (include verbatim in the comment so it is uniquely identifiable): ${runMarker}
-${inferences.length ? `- Key inferences/assumptions:\n${inferences.map((i) => `  - ${i}`).join('\n')}` : ''}
-
-REQUIRED ACTIONS — all three are mandatory, in order:
-
-1. Call mcp__claude_ai_Atlassian_Rovo__addCommentToJiraIssue on ${issueKey}. The comment body must include:
-   - The run marker on the first line: "${runMarker}"
-   - SQL purpose and target output object
-   - STM row count and completeness
-   - Requirement coverage against acceptance criteria
-   - BigQuery dry-run result (state "PASS" explicitly)
-   - Key assumptions or unresolved warnings
-
-2. Call mcp__claude_ai_Atlassian_Rovo__getTransitionsForJiraIssue on ${issueKey} to retrieve the list of available workflow transitions.
-
-3. From the transitions returned in step 2, pick the one whose name most closely matches "In Progress", "In Development", "Start Progress", or "Begin". Then call mcp__claude_ai_Atlassian_Rovo__transitionJiraIssue on ${issueKey} using that transition's ID. If no transition resembles an "in progress" state, pick the transition that moves the issue forward in the workflow.
-
-Hard constraints:
-- You MUST call addCommentToJiraIssue exactly once first. Do not skip it.
-- You MUST call getTransitionsForJiraIssue to discover the correct transition — do not guess the transition ID or name.
-- You MUST call transitionJiraIssue with the ID from the transitions list, not a guessed name.
-- Do NOT regenerate SQL, STM, or any validation block.
-- Do NOT call BigQuery tools.
-- Do NOT call getJiraIssue to inspect existing comments — go straight to addCommentToJiraIssue.
-- After all three calls return, reply with a single short confirmation sentence stating the comment ID and the new Jira status. Do NOT emit [SQL_READY] or any fenced sql/stm/validation/activity blocks.`;
-
-  const args = [
-    '-p',
-    '-',
-    '--output-format', 'stream-json',
-    '--max-turns', '8',
-    '--verbose',
-    '--dangerously-skip-permissions',
-  ];
-  if (session.conversationId) {
-    args.push('--resume', session.conversationId);
-  }
-
-  return new Promise((resolve, reject) => {
-    const proc = spawn(claudeBin, args, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: buildClaudeEnv(),
-    });
-    spawnedProcs.add(proc);
-
-    // Track whether Claude actually invoked the comment + transition tools.
-    // If the follow-up pass exits without these, we emit a hard warning
-    // because the architect just lost their Jira update.
-    const followUpState = { commentPosted: false, transitioned: false };
-
-    // Localised parser state — reuse semantic tool translator via parseClaudeLine.
-    const ctx = {
-      toolCalls: new Set(),
-      pendingToolCalls: new Map(),
-      // Mark dry-run as already-passed so the ordering detector stays silent
-      // during this pass (the gate already validated it upstream).
-      orderingState: { dryRunPassed: true, jiraCommentBeforeDryRun: false },
-    };
-
-    // Intercept tool_use lines to record whether the expected MCP calls fire.
-    const wrappedOnEvent = (event) => {
-      onEvent(event);
-    };
-
-    let buffer = '';
-    proc.stdout.on('data', (chunk) => {
-      buffer += chunk.toString('utf-8');
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        // Sniff the raw stream-json for the two required tool invocations so
-        // we can verify them independent of Claude's prose claims.
-        try {
-          const raw = JSON.parse(line);
-          const checkToolUse = (entry) => {
-            const n = String(entry?.name || entry?.tool_name || '').toLowerCase();
-            if (n.includes('addcomment') && n.includes('jira')) followUpState.commentPosted = true;
-            if (n.includes('transitionjira') && !n.includes('gettransitions')) followUpState.transitioned = true;
-          };
-          if (raw?.type === 'tool_use') checkToolUse(raw);
-          else if (raw?.type === 'assistant' && Array.isArray(raw?.message?.content)) {
-            for (const c of raw.message.content) if (c?.type === 'tool_use') checkToolUse(c);
-          }
-        } catch { /* not JSON, skip */ }
-        const result = parseClaudeLine(line, wrappedOnEvent, ctx);
-        if (result?.conversationId) session.conversationId = result.conversationId;
-      }
-    });
-
-    proc.stderr.on('data', (chunk) => {
-      const text = chunk.toString('utf-8').trim();
-      if (text) console.error(`  [jira-followup stderr] ${text}`);
-    });
-
-    proc.stdin.write(prompt, (err) => {
-      if (err) {
-        killChildProcess(proc);
-        spawnedProcs.delete(proc);
-        reject(new Error(`Failed to write Jira completion prompt: ${err.message}`));
-        return;
-      }
-      proc.stdin.end();
-    });
-
-    const timer = setTimeout(() => {
-      killChildProcess(proc);
-      spawnedProcs.delete(proc);
-      reject(new Error(`Jira completion pass timed out after ${JIRA_COMPLETION_TIMEOUT_MS / 1000}s`));
-    }, JIRA_COMPLETION_TIMEOUT_MS);
-
-    proc.on('close', (exitCode) => {
-      clearTimeout(timer);
-      spawnedProcs.delete(proc);
-      console.log(`  [jira-followup] Exited with code ${exitCode} for session ${sessionId.slice(0, 8)} commentPosted=${followUpState.commentPosted} transitioned=${followUpState.transitioned}`);
-
-      // Hard verification: if Claude didn't actually invoke the required
-      // Jira write tools, surface a loud failure card so the architect
-      // knows the Jira update did NOT happen.
-      if (!followUpState.commentPosted || !followUpState.transitioned) {
-        const missing = [
-          !followUpState.commentPosted ? 'comment' : null,
-          !followUpState.transitioned ? 'transition' : null,
-        ].filter(Boolean).join(' + ');
-        onEvent({
-          type: 'activity_event',
-          event: makeActivityEvent({
-            stage: 'validation',
-            type: 'error',
-            status: 'failed',
-            title: 'Jira Update Skipped',
-            summary: `The bridge's Jira follow-up pass ended without invoking the required ${missing} tool(s) on ${issueKey}. The Jira issue was NOT updated.`,
-            details: [
-              `Run marker that should have appeared on the comment: ${runMarker}`,
-              'This usually means Claude decided to skip; check the Claude CLI version supports the disallowedTools flag and that Jira write MCP tools are reachable.',
-            ],
-            evidence: [
-              `commentPosted=${followUpState.commentPosted}`,
-              `transitioned=${followUpState.transitioned}`,
-              `exitCode=${exitCode}`,
-            ],
-            source: 'bridge',
-          }),
-        });
-      }
-      resolve({ exitCode, ...followUpState });
-    });
-
-    proc.on('error', (err) => {
-      clearTimeout(timer);
-      spawnedProcs.delete(proc);
-      reject(err);
-    });
-  });
-}
 
 // ── JSON-Lines Parser ─────────────────────────────────────────
 // Handles the various event types from `claude --output-format stream-json`
@@ -2592,7 +2122,7 @@ function parseClaudeLine(line, onEvent, ctx) {
         orderingState.dryRunPassed = true;
       }
 
-      // Capture every dry-run attempt so the bridge can derive the gate
+      // Capture every dry-run attempt so the bridge can derive the validation
       // verdict from the raw tool_result. The LAST attempt is treated as the
       // verdict source (auto-fix retries on the same SQL converge to the
       // final version). Claude's self-reported sqlChecks.status is discarded
@@ -2648,9 +2178,18 @@ function parseClaudeLine(line, onEvent, ctx) {
   }
 
   // ── Result — final result from claude ─────────────────
+  // The Claude CLI uses `session_id` in current versions; older builds used
+  // `conversation_id` or bare `id`. Accept all three so --resume works.
+  // Capture `subtype` so the bridge can distinguish natural completion from
+  // max-turns / errors (drives the auto-retry copy).
   if (type === 'result') {
-    const conversationId = parsed.conversation_id || parsed.id || null;
-    return { conversationId };
+    const conversationId = parsed.session_id || parsed.conversation_id || parsed.id || null;
+    const subtype = parsed.subtype || null;
+    const numTurns = typeof parsed.num_turns === 'number' ? parsed.num_turns : null;
+    if (ctx && typeof ctx === 'object') {
+      ctx.lastResult = { subtype, numTurns, isError: !!parsed.is_error };
+    }
+    return { conversationId, resultSubtype: subtype, numTurns };
   }
 
   return null;
@@ -2704,9 +2243,7 @@ const server = http.createServer(async (req, res) => {
       },
       features: {
         offlineDryRunEnabled: OFFLINE_DRY_RUN_ENABLED,
-        requireSqlChecksPass: REQUIRE_SQLCHECKS_PASS,
-        jiraCompletionEnabled: JIRA_COMPLETION_ENABLED,
-        l3CoverageCheckEnabled: L3_ENABLED,
+        validatorSkillLoaded: VALIDATOR_SKILL_LOADED,
       },
       lastError: bridgeState.lastErrorAt ? {
         atIso: new Date(bridgeState.lastErrorAt).toISOString(),
@@ -2738,7 +2275,7 @@ const server = http.createServer(async (req, res) => {
     const sessionId = req.url.split('/session/')[1];
     if (sessionId && sessions.has(sessionId)) {
       sessions.delete(sessionId);
-      console.log(`  [session] Deleted session ${sessionId.slice(0, 8)}`);
+      rootLogger.info('Session deleted', { sessionId: sessionId.slice(0, 8) });
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ deleted: true }));
     } else {
@@ -2847,14 +2384,15 @@ const server = http.createServer(async (req, res) => {
         idempotency.set(idempotencyKey, { state: 'in_flight', requestId, completedAt: 0, succeeded: false });
       }
 
-      // Client-disconnect abort. The SSE response closes when the browser
-      // navigates away or the tab is closed. We propagate the abort into the
-      // Claude session so the child process tree is killed promptly rather
-      // than running to its wall-clock timeout while no one is listening.
+      // Client-disconnect abort. Listen on `res` (the response/socket half),
+      // not `req`. In HTTP/1.1, req.on('close') fires when the request body
+      // is fully consumed — which happens immediately after readBody() returns,
+      // long before Claude starts. res.on('close') fires only when the response
+      // socket is torn down before res.end() — the genuine mid-stream disconnect.
       const clientAbort = new AbortController();
       let clientDisconnected = false;
-      req.on('close', () => {
-        if (!clientDisconnected) {
+      res.on('close', () => {
+        if (!clientDisconnected && !res.writableEnded) {
           clientDisconnected = true;
           requestLog.warn('Client disconnected mid-stream');
           metrics.incr('requests_client_disconnect', { endpoint: '/chat' });
@@ -2882,10 +2420,13 @@ const server = http.createServer(async (req, res) => {
           } else if (res.socket && typeof res.socket.uncork === 'function') {
             res.socket.uncork();
           }
-          const elapsed = Date.now() - requestStartMs;
-          // Skip noisy heartbeat status pings in the log.
           if (event !== 'message_delta') {
-            console.log(`  [sse +${String(elapsed).padStart(5, ' ')}ms] ${event}${data && data.stage ? ` stage=${data.stage}` : ''}${data && data.event && data.event.title ? ` "${data.event.title}"` : ''}`);
+            requestLog.debug('SSE event sent', {
+              elapsedMs: Date.now() - requestStartMs,
+              event,
+              stage: data && data.stage,
+              title: data && data.event && data.event.title,
+            });
           }
         } catch {
           // Client disconnected.
@@ -2927,7 +2468,7 @@ const server = http.createServer(async (req, res) => {
               sseSend('clarification', { ...event, timestamp: Date.now() });
               break;
             case 'sql':
-              sseSend('sql', { sql: event.sql, fileName: event.fileName, timestamp: Date.now() });
+              sseSend('sql', { sql: event.sql, fileName: event.fileName, warning: event.warning, timestamp: Date.now() });
               break;
             case 'stm':
               sseSend('stm', { artifact: event.artifact, timestamp: Date.now() });
@@ -3044,33 +2585,23 @@ const server = http.createServer(async (req, res) => {
 // ── Start Server ──────────────────────────────────────────────
 
 server.listen(PORT, '127.0.0.1', () => {
-  console.log('');
-  console.log('  ╔══════════════════════════════════════════════╗');
-  console.log('  ║   SQL Curator Claude Bridge v1.0             ║');
-  console.log('  ║   Claude Code CLI → SSE Proxy                ║');
-  console.log('  ╠══════════════════════════════════════════════╣');
-  console.log(`  ║   Port:          ${String(PORT).padEnd(27)}║`);
-  console.log(`  ║   Claude CLI:    ${findClaude() ? 'detected ✓'.padEnd(27) : 'NOT FOUND ✗'.padEnd(27)}║`);
-  console.log(`  ║   Max Turns:     ${String(CLAUDE_MAX_TURNS).padEnd(27)}║`);
-  console.log(`  ║   Timeout:       ${String(CLAUDE_TIMEOUT_MS / 1000 + 's').padEnd(27)}║`);
-  console.log(`  ║   Concurrency:   ${String(MAX_CONCURRENT).padEnd(27)}║`);
-  console.log('  ╠══════════════════════════════════════════════╣');
-  console.log('  ║   Endpoints:                                    ║');
-  console.log('  ║     POST /chat         Send prompt → Claude   ║');
-  console.log('  ║     GET  /health       Health check           ║');
-  console.log('  ║     DELETE /session/:id Clear session history ║');
-  console.log('  ╠══════════════════════════════════════════════╣');
-  console.log('  ║   MCP Tools: Jira, BigQuery, GitHub            ║');
-  console.log('  ║   Config:    ~/.claude.json                    ║');
-  console.log('  ╚══════════════════════════════════════════════╝');
-  console.log('');
+  const claudeBin = findClaude();
+  rootLogger.info('Claude bridge started', {
+    host: '127.0.0.1',
+    port: PORT,
+    claudeDetected: !!claudeBin,
+    claudeBin,
+    maxTurns: CLAUDE_MAX_TURNS,
+    timeoutMs: CLAUDE_TIMEOUT_MS,
+    maxConcurrent: MAX_CONCURRENT,
+    endpoints: ['POST /chat', 'GET /health', 'GET /metrics', 'DELETE /session/:id'],
+  });
 
-  if (!findClaude()) {
-    console.error('  ⚠  WARNING: Claude CLI not found on PATH!');
-    console.error('     Install: npm install -g @anthropic-ai/claude-code');
-    console.error('     Docs:   https://docs.anthropic.com/en/docs/claude-code/overview');
-    console.error('     MCP:    https://modelcontextprotocol.io/docs/develop/connect-local-servers');
-    console.error('');
+  if (!claudeBin) {
+    rootLogger.warn('Claude CLI not found on PATH', {
+      install: 'npm install -g @anthropic-ai/claude-code',
+      docs: 'https://docs.anthropic.com/en/docs/claude-code/overview',
+    });
   }
 });
 

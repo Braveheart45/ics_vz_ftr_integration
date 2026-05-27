@@ -3,11 +3,11 @@
   "version": "0.2.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 3000 2>&1 | tee dev.log",
+    "dev": "next dev -p 3000",
     "dev:public": "next dev -H 0.0.0.0 -p 3000",
     "build": "next build",
     "bridge": "node mini-services/claude-bridge/index.js",
-    "start": "NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log",
+    "start": "bun .next/standalone/server.js",
     "start:public": "next start -H 0.0.0.0 -p 3000",
     "lint": "eslint ."
   },

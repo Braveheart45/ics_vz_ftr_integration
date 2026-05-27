@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Maximize2, Minimize2, MessageSquare } from 'lucide-react';
 import { TaskTypeSelector } from './task-type-selector';
 import { InputSection } from './input-section';
@@ -30,11 +31,13 @@ export function RightPanel() {
 
   const inputSection = (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-border/60 bg-background shadow-[0_2px_8px_0_oklch(0_0_0/0.04),0_1px_2px_0_oklch(0_0_0/0.03)]">
-      <div className="flex h-11 shrink-0 items-center justify-between border-b border-border/40 bg-muted/40 px-3">
-        <TaskTypeSelector />
+      <div className="flex h-11 shrink-0 items-center justify-between gap-2 overflow-hidden border-b border-border/40 bg-muted/40 px-3">
+        <div className="min-w-0 overflow-hidden">
+          <TaskTypeSelector />
+        </div>
         <button
           onClick={() => setInputMaximized((v) => !v)}
-          className="flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+          className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           title={inputMaximized ? 'Restore (Esc)' : 'Maximize'}
         >
           {inputMaximized ? <Minimize2 className="size-3.5" /> : <Maximize2 className="size-3.5" />}
@@ -48,14 +51,14 @@ export function RightPanel() {
 
   const chatSection = (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-border/60 bg-background shadow-[0_2px_8px_0_oklch(0_0_0/0.04),0_1px_2px_0_oklch(0_0_0/0.03)]">
-      <div className="flex h-11 shrink-0 items-center justify-between border-b border-border/40 bg-muted/40 px-3">
-        <div className="flex items-center gap-1.5 rounded-md bg-[#4285F4] px-2.5 py-1 text-xs font-semibold text-white shadow-[0_1px_2px_0_oklch(0_0_0/0.03)]">
+      <div className="flex h-11 shrink-0 items-center justify-between gap-2 overflow-hidden border-b border-border/40 bg-muted/40 px-3">
+        <div className="flex min-w-0 items-center gap-1.5 rounded-md bg-[#4285F4] px-2.5 py-1 text-xs font-semibold text-white shadow-[0_1px_2px_0_oklch(0_0_0/0.03)]">
           <MessageSquare className="size-3 text-white/80" />
-          <span>Clarification Panel</span>
+          <span className="truncate">Clarification Panel</span>
         </div>
         <button
           onClick={() => setChatMaximized((v) => !v)}
-          className="flex size-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+          className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           title={chatMaximized ? 'Restore (Esc)' : 'Maximize'}
         >
           {chatMaximized ? <Minimize2 className="size-3.5" /> : <Maximize2 className="size-3.5" />}
@@ -70,17 +73,13 @@ export function RightPanel() {
   return (
     <div className="flex h-full min-h-0 flex-col bg-background p-2.5">
       {/* Maximized overlays */}
-      {inputMaximized && (
-        <>
-          <div className="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm" onClick={closeAll} />
-          <div className="fixed inset-0 z-50 overflow-hidden p-3">{inputSection}</div>
-        </>
+      {inputMaximized && typeof document !== 'undefined' && createPortal(
+        <div className="fixed inset-0 z-50 overflow-hidden bg-background">{inputSection}</div>,
+        document.body,
       )}
-      {chatMaximized && (
-        <>
-          <div className="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm" onClick={closeAll} />
-          <div className="fixed inset-0 z-50 overflow-hidden p-3">{chatSection}</div>
-        </>
+      {chatMaximized && typeof document !== 'undefined' && createPortal(
+        <div className="fixed inset-0 z-50 overflow-hidden bg-background">{chatSection}</div>,
+        document.body,
       )}
 
       {/* Normal layout — vertical resizable split */}

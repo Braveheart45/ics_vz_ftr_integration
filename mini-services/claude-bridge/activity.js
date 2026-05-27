@@ -10,7 +10,7 @@
 // Pure — no side effects, no cross-module imports. Safe to unit-test.
 // ============================================================
 
-const ACTIVITY_TYPES = new Set(['observation', 'inference', 'decision', 'validation', 'error', 'artifact']);
+const ACTIVITY_TYPES = new Set(['summary', 'observation', 'inference', 'decision', 'validation', 'error', 'artifact']);
 const ACTIVITY_STATUSES = new Set(['running', 'completed', 'warning', 'failed', 'blocked', 'pending']);
 const ACTIVITY_SOURCES = new Set(['claude', 'bridge', 'jira', 'bigquery', 'github', 'offline', 'fallback']);
 
@@ -23,6 +23,7 @@ const ACTIVITY_SOURCES = new Set(['claude', 'bridge', 'jira', 'bigquery', 'githu
  */
 function inferActivityType(text) {
   const value = String(text || '').toLowerCase();
+  if (/summary|recap|digest|overall result|run result/.test(value)) return 'summary';
   if (/error|failed|failure|limit|blocked|missing|not found|denied|unable/.test(value)) return 'error';
   if (/infer|assum|confidence|candidate|proposed|likely/.test(value)) return 'inference';
   if (/decision|selected|chosen|approved|load pattern|object type|partition|cluster/.test(value)) return 'decision';

@@ -1,1 +1,1 @@
-@skills/sqlforge/SKILL.md
+@skills/generator.md

@@ -16,6 +16,10 @@ test('inferActivityType classifies error language', () => {
   assert.equal(inferActivityType('Dry run failed: column not found'), 'error');
 });
 
+test('inferActivityType classifies summary language', () => {
+  assert.equal(inferActivityType('Run summary published for review'), 'summary');
+});
+
 test('inferActivityType classifies inference language', () => {
   assert.equal(inferActivityType('Inferred target table from acceptance criteria with 75% confidence'), 'inference');
 });

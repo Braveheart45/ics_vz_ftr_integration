@@ -14,8 +14,6 @@ export async function POST(request: NextRequest) {
 
     return forwardToBridge(body);
   } catch (error) {
-    console.error('[POST /api/generate] Error:', error);
-
     return new Response(
       JSON.stringify({
         error: error instanceof Error ? error.message : 'Failed to generate SQL',

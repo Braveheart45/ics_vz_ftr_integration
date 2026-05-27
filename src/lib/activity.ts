@@ -43,6 +43,7 @@ function inferStageFromText(text: string): WorkflowStage {
 
 function inferTypeFromText(text: string): AgentActivityType {
   const value = text.toLowerCase();
+  if (/summary|recap|digest|overall result|run result/.test(value)) return 'summary';
   if (/error|failed|failure|limit|blocked|missing|not found/.test(value)) return 'error';
   if (/infer|assum|confidence|candidate|proposed/.test(value)) return 'inference';
   if (/decision|selected|chosen|approved|load pattern|object type|partition/.test(value)) return 'decision';
@@ -70,6 +71,7 @@ function fingerprint(event: AgentActivityEvent): string {
 }
 
 const ALLOWED_TYPES: ReadonlySet<AgentActivityType> = new Set([
+  'summary',
   'observation',
   'inference',
   'decision',

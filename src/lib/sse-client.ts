@@ -15,7 +15,7 @@ export interface SSEStatusEvent        { type: 'status';          stage: Workflo
 export interface SSEMessageStartEvent  { type: 'message_start' }
 export interface SSEMessageDeltaEvent  { type: 'message_delta';   content: string }
 export interface SSEMessageEvent       { type: 'message';         content: string }
-export interface SSESQLEvent           { type: 'sql';             sql: string; fileName: string }
+export interface SSESQLEvent           { type: 'sql';             sql: string; fileName: string; warning?: string }
 export interface SSEErrorEvent         { type: 'error';           message: string; hint?: string }
 export interface SSEDoneEvent          { type: 'done';            success?: boolean }
 export interface SSEClarificationEvent {
@@ -88,6 +88,7 @@ export function dispatchSSEEvent(event: SSEEvent): void {
         isEdited:    false,
         fileName:    event.fileName,
         generatedAt: new Date().toISOString(),
+        warning:     event.warning,
       });
       break;
 
@@ -176,8 +177,8 @@ export async function processSSEStream(res: Response): Promise<void> {
       parsed.type  = currentEvent as SSEEvent['type'];
       dispatchSSEEvent(parsed);
       if (currentEvent === 'done') sawDone = true;
-    } catch (error) {
-      console.warn('[SQL Curator SSE] Skipped malformed event:', error);
+    } catch {
+      // Ignore malformed SSE frames; the stream continues with the next frame.
     } finally {
       currentEvent = '';
       currentData  = '';

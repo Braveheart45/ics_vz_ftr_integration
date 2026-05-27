@@ -13,8 +13,6 @@ export async function POST(request: NextRequest) {
 
     return forwardToBridge({ ...body, taskType: 'github_deploy' });
   } catch (error) {
-    console.error('[POST /api/deploy] Error:', error);
-
     return new Response(
       JSON.stringify({
         error: error instanceof Error ? error.message : 'Failed to deploy SQL through Claude Code',

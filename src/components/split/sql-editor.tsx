@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Copy,
   Check,
@@ -14,6 +15,7 @@ import {
   FileJson,
   FileSpreadsheet,
   Terminal,
+  AlertTriangle,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -104,6 +106,15 @@ export function SqlEditor() {
     const t = setTimeout(() => setSqlFlash(false), 1200);
     return () => clearTimeout(t);
   }, [sqlOutput?.fileName]);
+
+  useEffect(() => {
+    if (!isMaximized) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') toggleMaximize();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isMaximized, toggleMaximize]);
 
   // ── Copy to Clipboard ────────────────────────────────────
   const handleCopy = useCallback(async () => {
@@ -414,7 +425,7 @@ export function SqlEditor() {
               disabled={disabled}
               aria-label={title}
               className={cn(
-                'h-7 w-7 rounded-md text-muted-foreground/55 transition-all duration-200',
+                'h-7 w-7 shrink-0 rounded-md text-muted-foreground/55 transition-all duration-200',
                 'hover:bg-secondary/80 hover:text-foreground/80',
                 'hover:scale-110 active:scale-95',
                 active && 'bg-secondary text-foreground/90'
@@ -445,10 +456,10 @@ export function SqlEditor() {
       )}
     >
       {/* ── Toolbar ──────────────────────────────────────── */}
-      <div className="flex h-11 shrink-0 items-center justify-between border-b border-border/40 bg-muted/40 px-3">
+      <div className="flex h-11 shrink-0 items-center justify-between gap-2 overflow-hidden border-b border-border/40 bg-muted/40 px-3">
         {/* Left: File tab */}
-        <div className="flex items-center gap-2 min-w-0">
-          <div className="flex items-center gap-1.5 rounded-md bg-[#4285F4] px-2.5 py-1 text-xs font-medium text-white shadow-[0_1px_2px_0_oklch(0_0_0/0.03)]">
+        <div className="flex min-w-0 items-center gap-2 overflow-hidden">
+          <div className="flex min-w-0 items-center gap-1.5 rounded-md bg-[#4285F4] px-2.5 py-1 text-xs font-medium text-white shadow-[0_1px_2px_0_oklch(0_0_0/0.03)]">
             <FileCode2 className="size-3 text-white/70" />
             <span className="truncate max-w-[160px]">{sqlOutput?.fileName || 'Output.sql'}</span>
           </div>
@@ -463,7 +474,7 @@ export function SqlEditor() {
         </div>
 
         {/* Right: Actions */}
-        <div className="flex items-center gap-0.5 shrink-0">
+        <div className="flex min-w-0 max-w-[62%] shrink items-center gap-0.5 overflow-x-auto custom-scrollbar">
           <ToolBtn onClick={handleCopy} disabled={!sqlOutput} title="Copy">
             {copied ? <Check className="size-3.5 text-primary" /> : <Copy className="size-3.5" />}
           </ToolBtn>
@@ -494,6 +505,15 @@ export function SqlEditor() {
           </ToolBtn>
         </div>
       </div>
+
+      {sqlOutput?.warning && (
+        <div className="shrink-0 border-b border-amber-300/50 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-950">
+          <div className="flex min-w-0 items-start gap-2">
+            <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-amber-600" />
+            <span className="min-w-0 leading-relaxed">{sqlOutput.warning}</span>
+          </div>
+        </div>
+      )}
 
       {/* ── Code Area ────────────────────────────────────── */}
       <div className="flex-1 min-h-0 overflow-auto custom-scrollbar">
@@ -563,11 +583,10 @@ export function SqlEditor() {
   if (isMaximized) {
     return (
       <>
-        <div
-          className="fixed inset-0 bg-black/50 backdrop-blur-sm z-40"
-          onClick={toggleMaximize}
-        />
-        <div className="fixed inset-0 z-50 overflow-hidden shadow-2xl">{editorContent}</div>
+        {typeof document !== 'undefined' && createPortal(
+          <div className="fixed inset-0 z-50 overflow-hidden bg-background shadow-2xl">{editorContent}</div>,
+          document.body,
+        )}
         <RegenerateDialog />
       </>
     );

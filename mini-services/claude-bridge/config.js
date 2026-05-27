@@ -16,29 +16,18 @@
 
 const DEFAULTS = {
   BRIDGE_PORT: '3001',
-  CLAUDE_MAX_TURNS: '25',
+  // Linear S01→S14 needs budget for Jira read + 2-4 schema reads + SQL gen +
+  // dry-run (up to 3 retries) + 3 Jira writes + reasoning turns. 25 was too
+  // tight and forced an auto-retry on the second pass; 50 leaves headroom.
+  CLAUDE_MAX_TURNS: '50',
   CLAUDE_TIMEOUT_MS: '1200000',
   MAX_HISTORY_MESSAGES: '20',
   CLAUDE_MAX_CONCURRENT: '3',
   SQL_CURATOR_MAX_REQUEST_BODY_BYTES: String(2 * 1024 * 1024),
   SQL_CURATOR_MAX_STREAM_BUFFER_BYTES: String(8 * 1024 * 1024),
   SQL_CURATOR_ENABLE_OFFLINE_DRY_RUN: 'false',
-  SQL_CURATOR_REQUIRE_DRYRUN_PASS: 'true',
-  SQL_CURATOR_DEFER_JIRA_COMPLETION: 'true',
-  SQL_CURATOR_JIRA_COMPLETION_TIMEOUT_MS: '120000',
-  SQL_CURATOR_L3_TIMEOUT_MS: '45000',
-  SQL_CURATOR_L3_COVERAGE_CHECK: 'true',
   SQL_CURATOR_LOG_LEVEL: 'info',
 };
-
-const DEFAULT_JIRA_WRITE_TOOLS = [
-  'mcp__claude_ai_Atlassian_Rovo__addCommentToJiraIssue',
-  'mcp__claude_ai_Atlassian_Rovo__addWorklogToJiraIssue',
-  'mcp__claude_ai_Atlassian_Rovo__transitionJiraIssue',
-  'mcp__claude_ai_Atlassian_Rovo__editJiraIssue',
-  'mcp__claude_ai_Atlassian_Rovo__createJiraIssue',
-  'mcp__claude_ai_Atlassian_Rovo__createIssueLink',
-];
 
 const VALID_LOG_LEVELS = new Set(['trace', 'debug', 'info', 'warn', 'error', 'fatal']);
 
@@ -64,9 +53,7 @@ function parseBool(raw) {
  * @property {number} port
  * @property {Readonly<{maxTurns:number, timeoutMs:number, maxConcurrent:number}>} claude
  * @property {Readonly<{maxHistoryMessages:number, maxRequestBodyBytes:number, maxStreamBufferBytes:number}>} server
- * @property {Readonly<{offlineDryRunEnabled:boolean, requireSqlChecksPass:boolean, jiraCompletionEnabled:boolean, l3CoverageCheckEnabled:boolean}>} features
- * @property {Readonly<{jiraCompletionMs:number, l3CoverageMs:number}>} timeouts
- * @property {readonly string[]} jiraWriteTools
+ * @property {Readonly<{offlineDryRunEnabled:boolean}>} features
  * @property {string} logLevel
  */
 
@@ -89,13 +76,6 @@ function loadConfig(env = process.env) {
   const maxConcurrent = parseIntInRange('CLAUDE_MAX_CONCURRENT', read('CLAUDE_MAX_CONCURRENT'), { min: 1, max: 32 }, errors);
   const maxRequestBodyBytes = parseIntInRange('SQL_CURATOR_MAX_REQUEST_BODY_BYTES', read('SQL_CURATOR_MAX_REQUEST_BODY_BYTES'), { min: 1024, max: 64 * 1024 * 1024 }, errors);
   const maxStreamBufferBytes = parseIntInRange('SQL_CURATOR_MAX_STREAM_BUFFER_BYTES', read('SQL_CURATOR_MAX_STREAM_BUFFER_BYTES'), { min: 64 * 1024, max: 256 * 1024 * 1024 }, errors);
-  const jiraCompletionTimeoutMs = parseIntInRange('SQL_CURATOR_JIRA_COMPLETION_TIMEOUT_MS', read('SQL_CURATOR_JIRA_COMPLETION_TIMEOUT_MS'), { min: 5000, max: 30 * 60 * 1000 }, errors);
-  const l3TimeoutMs = parseIntInRange('SQL_CURATOR_L3_TIMEOUT_MS', read('SQL_CURATOR_L3_TIMEOUT_MS'), { min: 5000, max: 10 * 60 * 1000 }, errors);
-
-  const jiraWriteToolsRaw = (env.SQL_CURATOR_JIRA_WRITE_TOOLS || '').trim();
-  const jiraWriteTools = jiraWriteToolsRaw
-    ? jiraWriteToolsRaw.split(',').map((t) => t.trim()).filter(Boolean)
-    : DEFAULT_JIRA_WRITE_TOOLS;
 
   const logLevel = String(read('SQL_CURATOR_LOG_LEVEL')).toLowerCase();
   if (!VALID_LOG_LEVELS.has(logLevel)) {
@@ -124,19 +104,11 @@ function loadConfig(env = process.env) {
     }),
     features: Object.freeze({
       offlineDryRunEnabled: parseBool(read('SQL_CURATOR_ENABLE_OFFLINE_DRY_RUN')),
-      requireSqlChecksPass: parseBool(read('SQL_CURATOR_REQUIRE_DRYRUN_PASS')),
-      jiraCompletionEnabled: parseBool(read('SQL_CURATOR_DEFER_JIRA_COMPLETION')),
-      l3CoverageCheckEnabled: parseBool(read('SQL_CURATOR_L3_COVERAGE_CHECK')),
     }),
-    timeouts: Object.freeze({
-      jiraCompletionMs: jiraCompletionTimeoutMs,
-      l3CoverageMs: l3TimeoutMs,
-    }),
-    jiraWriteTools: Object.freeze(jiraWriteTools),
     logLevel,
   });
 
   return config;
 }
 
-module.exports = { loadConfig, DEFAULTS, DEFAULT_JIRA_WRITE_TOOLS };
+module.exports = { loadConfig, DEFAULTS };
