@@ -64,7 +64,12 @@ const {
   extractClarification,
   detectTerminalRunIssue,
 } = require('./output-parsers');
-const { decideSqlRelease } = require('./release-policy');
+const {
+  decideSqlRelease,
+  normalizeValidationStatus,
+  combineValidationStatuses,
+  deriveDryRunStatus,
+} = require('./release-policy');
 
 // ── Structured error responses ───────────────────────────────
 // All error paths funnel through one helper so the wire format stays
@@ -85,7 +90,7 @@ setLogLevel(CONFIG.logLevel);
 // ── Request-scoped identifiers ───────────────────────────────
 // Every HTTP request gets a short stable ID threaded into logs and error
 // payloads so a single run can be grep'd end-to-end from client → bridge →
-// Claude session → Jira follow-up → L3 cold session.
+// the single linear Claude session.
 function newRequestId() {
   return crypto.randomUUID().slice(0, 8);
 }
@@ -474,7 +479,7 @@ function extractStm(content, request, sessionId) {
   return parsed;
 }
 
-// L2 structural validation moved to ./structural-checks.js.
+// Validation status helpers (combine/derive/normalise) live in ./release-policy.js.
 // Activity event normalisers moved to ./activity.js.
 // Tool result parsing helpers moved to ./tool-helpers.js.
 // SQL/STM/clarification/terminal extractors moved to ./output-parsers.js.
@@ -725,19 +730,8 @@ function extractJiraSignals(content, hasJira) {
   };
 }
 
-function normalizeValidationStatus(status) {
-  const normalized = String(status || '').toLowerCase();
-  return ['pass', 'warning', 'fail', 'not_run'].includes(normalized) ? normalized : 'warning';
-}
-
-function combineValidationStatuses(statuses) {
-  const values = (statuses || []).map(normalizeValidationStatus).filter(Boolean);
-  if (values.length === 0) return 'not_run';
-  if (values.includes('fail')) return 'fail';
-  if (values.includes('warning')) return 'warning';
-  if (values.includes('not_run')) return 'not_run';
-  return 'pass';
-}
+// normalizeValidationStatus + combineValidationStatuses now live in
+// ./release-policy.js so they can be unit-tested in isolation.
 
 function normalizeValidationSection(section, fallbackSummary, fallbackChecks = [], fallbackStatus = 'warning') {
   const value = section && typeof section === 'object' ? section : {};
@@ -1527,12 +1521,12 @@ async function runClaude(prompt, sessionId, request, onEvent, ctx = {}, retryCou
   const pendingToolCalls = new Map();
   // Jira-ordering tracking: has a successful BigQuery dry-run completed yet?
   const orderingState = { dryRunPassed: false, jiraCommentBeforeDryRun: false };
-  // Bridge-owned validation verdict source: every BigQuery dry-run/execute MCP call
-  // that completes is captured here from the raw tool_result. The verdict is
-  // derived from the LAST attempt's is_error flag — Claude's prose verdict
-  // (validation.sqlChecks.status) is discarded. This is the only path that
-  // guarantees the validation decision is free of LLM interpretation bias while
-  // remaining inside the MCP-only constraint.
+  // Bridge-owned validation verdict source: every BigQuery dry-run/execute MCP
+  // call that completes is captured here from the raw tool_result. In the close
+  // handler, deriveDryRunStatus() reduces these to a deterministic pass/fail/
+  // not_run that OVERRIDES Claude's self-reported validation.sqlChecks.status
+  // when they disagree. This keeps the executional verdict free of LLM
+  // interpretation bias while remaining inside the MCP-only constraint.
   const dryRunAttempts = [];
 
   // Shared context passed to parseClaudeLine for every stream-json line. We
@@ -1760,27 +1754,67 @@ async function runClaude(prompt, sessionId, request, onEvent, ctx = {}, retryCou
         onEvent({ type: 'status', stage: 'validation', status: 'active', message: 'Parsing validator + dry-run + Jira results...' });
       }
 
-      // ── Single-source validation (linear in-session flow) ───
-      // S11 (validator persona) + S12 (dry-run) + S13 (Jira) all run inside
-      // Claude's main pass. We trust Claude's emitted `validation` JSON block
-      // as the authoritative source. The bridge does not overwrite or re-judge
-      // any of the sub-statuses.
+      // ── Validation (linear in-session flow + deterministic backstop) ───
+      // S11 (validator persona) + S12 (dry-run) + S13 (Jira) run inside Claude's
+      // main pass and Claude emits a `validation` JSON block. We DO NOT take
+      // Claude's self-reported sqlChecks.status on faith: the bridge captured
+      // every real execute_sql_readonly result in `dryRunAttempts`, and the
+      // deterministic dry-run verdict derived from those raw is_error flags
+      // OVERRIDES Claude's prose whenever they disagree. A hallucinated or
+      // skipped dry-run therefore cannot produce a clean release.
       let validationSummary = null;
       if (hasSqlBlock) {
         validationSummary = extractValidationSummary(finalText, request);
-        if (validationSummary) {
-          metrics.incr('validation_status', { source: 'stm', status: validationSummary?.stmCompleteness?.status || 'unknown' });
-          metrics.incr('validation_status', { source: 'requirements', status: validationSummary?.requirementCoverage?.status || 'unknown' });
-          metrics.incr('validation_status', { source: 'sql_dryrun', status: validationSummary?.sqlChecks?.status || 'unknown' });
-          metrics.incr('validation_status', { source: 'jira', status: validationSummary?.jiraTransition?.status || 'unknown' });
-        }
       }
 
-      // Take the worst status across the validator + dry-run sub-sections.
+      // Deterministic dry-run status from the raw tool results (not Claude prose).
+      const deterministicDryRun = deriveDryRunStatus(dryRunAttempts);
+      const claudeDryRun = normalizeValidationStatus(validationSummary?.sqlChecks?.status);
+      const dryRunDisagreement = hasSqlBlock && validationSummary && deterministicDryRun !== claudeDryRun;
+
+      // Reconcile: the deterministic signal wins. Overwrite the sqlChecks
+      // section so the UI's validation summary reflects reality, not the claim.
+      if (hasSqlBlock && validationSummary) {
+        const dryRunSummary =
+          deterministicDryRun === 'not_run'
+            ? 'No BigQuery dry-run (execute_sql_readonly) was observed during the run. S12 was skipped — the SQL has NOT been executionally validated.'
+            : deterministicDryRun === 'fail'
+              ? 'The last BigQuery dry-run returned an error. The SQL did not pass executional validation.'
+              : 'BigQuery dry-run completed without error.';
+        validationSummary.sqlChecks = {
+          status: deterministicDryRun,
+          summary: dryRunSummary,
+          checks: [
+            `Dry-run attempts observed: ${dryRunAttempts.length}.`,
+            dryRunDisagreement
+              ? `Claude self-reported sqlChecks="${claudeDryRun}" but the bridge observed "${deterministicDryRun}" — bridge signal wins.`
+              : `Bridge-observed dry-run status: ${deterministicDryRun}.`,
+          ],
+        };
+      }
+
+      if (validationSummary) {
+        metrics.incr('validation_status', { source: 'stm', status: validationSummary?.stmCompleteness?.status || 'unknown' });
+        metrics.incr('validation_status', { source: 'requirements', status: validationSummary?.requirementCoverage?.status || 'unknown' });
+        metrics.incr('validation_status', { source: 'sql_dryrun', status: deterministicDryRun });
+        metrics.incr('validation_status', { source: 'jira', status: validationSummary?.jiraTransition?.status || 'unknown' });
+        if (dryRunDisagreement) metrics.incr('dry_run_disagreement', { claude: claudeDryRun, bridge: deterministicDryRun });
+      }
+
+      // Out-of-order Jira write detector (#4/#5): if Claude posted a Jira
+      // comment/transition BEFORE a successful dry-run, that is a contract
+      // violation that writes to an external system against unvalidated SQL.
+      // Surface it as a release-affecting warning directly (jiraTransition is
+      // intentionally NOT part of combineValidationStatuses, so route it here).
+      const prematureJiraWrite = !!orderingState.jiraCommentBeforeDryRun;
+
+      // Take the worst status across the validator sub-sections + the
+      // deterministic dry-run + the premature-Jira flag.
       const validationStatus = combineValidationStatuses([
         validationSummary?.stmCompleteness?.status,
         validationSummary?.requirementCoverage?.status,
-        validationSummary?.sqlChecks?.status,
+        deterministicDryRun,
+        prematureJiraWrite ? 'warning' : 'pass',
       ]);
 
       const releaseDecision = decideSqlRelease({
@@ -1812,6 +1846,49 @@ async function runClaude(prompt, sessionId, request, onEvent, ctx = {}, retryCou
             source: 'claude',
           }),
         });
+        // Dedicated card when Claude skipped the mandatory S12 dry-run.
+        if (deterministicDryRun === 'not_run') {
+          onEvent({
+            type: 'activity_event',
+            event: makeActivityEvent({
+              stage: 'validation',
+              type: 'error',
+              status: 'warning',
+              title: 'Mandatory Dry-Run Was Skipped',
+              summary: 'No execute_sql_readonly call was observed this run. S12 is mandatory; the released SQL has NOT been executionally validated against BigQuery.',
+              details: ['Re-run, or run the SQL through a BigQuery dry-run manually before using it.'],
+              source: 'bridge',
+            }),
+          });
+        }
+        // Dedicated card when the deterministic signal contradicts Claude.
+        if (dryRunDisagreement && deterministicDryRun !== 'not_run') {
+          onEvent({
+            type: 'activity_event',
+            event: makeActivityEvent({
+              stage: 'validation',
+              type: 'validation',
+              status: deterministicDryRun === 'fail' ? 'failed' : 'warning',
+              title: 'Dry-Run Verdict Corrected by Bridge',
+              summary: `Claude reported the dry-run as "${claudeDryRun}", but the bridge observed "${deterministicDryRun}" from the actual BigQuery tool result. The bridge signal is authoritative.`,
+              source: 'bridge',
+            }),
+          });
+        }
+        // Dedicated card when Jira was written before a successful dry-run.
+        if (prematureJiraWrite) {
+          onEvent({
+            type: 'activity_event',
+            event: makeActivityEvent({
+              stage: 'validation',
+              type: 'error',
+              status: 'warning',
+              title: 'Jira Written Before Validation',
+              summary: 'A Jira comment/transition was issued before a successful dry-run completed. The Jira issue may have been updated against unvalidated SQL.',
+              source: 'bridge',
+            }),
+          });
+        }
         if (sqlReleaseWarning) {
           onEvent({
             type: 'activity_event',
@@ -1824,8 +1901,9 @@ async function runClaude(prompt, sessionId, request, onEvent, ctx = {}, retryCou
               details: [
                 `STM ↔ SQL alignment: ${validationSummary?.stmCompleteness?.status || 'unknown'}`,
                 `Requirement coverage: ${validationSummary?.requirementCoverage?.status || 'unknown'}`,
-                `Dry-run: ${validationSummary?.sqlChecks?.status || 'unknown'}`,
-              ],
+                `Dry-run (bridge-verified): ${deterministicDryRun}`,
+                prematureJiraWrite ? 'Jira was written before validation completed.' : null,
+              ].filter(Boolean),
               source: 'bridge',
             }),
           });
@@ -2122,11 +2200,10 @@ function parseClaudeLine(line, onEvent, ctx) {
         orderingState.dryRunPassed = true;
       }
 
-      // Capture every dry-run attempt so the bridge can derive the validation
-      // verdict from the raw tool_result. The LAST attempt is treated as the
-      // verdict source (auto-fix retries on the same SQL converge to the
-      // final version). Claude's self-reported sqlChecks.status is discarded
-      // in favor of this deterministic signal.
+      // Capture every dry-run attempt so the close handler can derive the
+      // deterministic executional verdict (deriveDryRunStatus). The LAST
+      // attempt is the verdict source (auto-fix retries converge on the final
+      // SQL). This overrides Claude's self-reported sqlChecks.status.
       if (isDryRunTool && dryRunAttempts) {
         const sqlFromInput =
           (toolInput && typeof toolInput === 'object' && (toolInput.query || toolInput.sql || toolInput.statement)) || null;

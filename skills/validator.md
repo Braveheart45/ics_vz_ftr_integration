@@ -85,59 +85,37 @@ When you do emit corrected SQL:
 - Preserve every other line of the original SQL exactly
 - List every change in `corrections[]` with a human-readable description
 
-## Output format
+## Output format — fold your findings into the run's `validation` block
 
-Return exactly two fenced blocks in this order. No prose before, between, or after them. Block 2 is omitted if no corrections are needed.
+You are operating **inside the generator's single linear session**, not as a separate process. Do **not** emit a standalone `verdict` block — the bridge does not read one. Instead, your three task outcomes map directly onto the `validation` JSON block the run emits at S14, and your corrected SQL (if any) becomes the run's final fenced ` ```sql ` block. The mapping is:
 
-**Block 1 — always required:**
+| Validator task | Where it goes in the `validation` block |
+|---|---|
+| Task 1 — Requirements Coverage | `requirementCoverage.status` + `requirementCoverage.checks[]` (one check line per criterion: text, covered true/partial/false, evidence STM row) |
+| Task 2 — Inference Soundness | For each unsound inference, lower its `confidence` in the `inferences[]` array to your `assessedConfidence`, and add a one-line note to `activityDetails[]` naming the claim and the concern |
+| Task 3 — SQL ↔ STM Alignment | `stmCompleteness.status` + `stmCompleteness.checks[]` (target-column coverage, source-table coverage, transformation fidelity, business-rule filters, obvious syntax) |
+| Corrected SQL (if any) | Replace the run's final ` ```sql ` block with the corrected version; describe each change in an `activity` block titled "SQL Corrected by Validator" and in `activityDetails[]` |
 
-```verdict
-{
-  "status": "pass"|"warning"|"fail",
-  "summary": "One sentence covering all three validation dimensions.",
-  "requirementCoverage": {
-    "status": "pass"|"warning"|"fail",
-    "criteria": [
-      { "text": "...", "covered": true|false|"partial", "evidenceStmRow": "sourceField→targetColumn or N/A" }
-    ]
-  },
-  "inferenceAssessment": [
-    {
-      "claim": "...",
-      "originalConfidence": 82,
-      "assessedConfidence": 75,
-      "sound": true
-    }
-  ],
-  "sqlAlignment": {
-    "status": "pass"|"warning"|"fail",
-    "issues": []
-  },
-  "corrections": []
-}
-```
+Also emit a `validation`-type inline `activity` block summarising the validator outcome the moment you finish, e.g.:
 
-**Block 2 — only when concrete SQL corrections were made:**
-
-```sql
--- corrected SQL
+```activity
+{"stage":"validation","type":"validation","status":"completed","title":"Validator persona — alignment + coverage check","summary":"All 8 STM target columns map to SELECT aliases; every acceptance criterion covered; 1 inference downgraded 82→60 for weak evidence.","evidence":["STM rows 1-8 → SELECT aliases","AC3 'monthly' → usage_month"],"source":"claude"}
 ```
 
 ## Status rules — apply strictly
 
-**Overall `status`:**
-- `"pass"` — all three sub-sections pass; `corrections` is empty
-- `"warning"` — at least one sub-section is `"warning"`, none are `"fail"`
-- `"fail"` — at least one sub-section is `"fail"`
-
-Any `sound: false` inference with a gap > 15 between `originalConfidence` and `assessedConfidence` raises overall `status` to at least `"warning"`. A gap of exactly 15 does not trigger this rule on its own.
+These rules determine the section statuses you write into the `validation` block.
 
 **`requirementCoverage.status`:**
-- `"pass"` — every criterion `covered: true`
-- `"warning"` — at least one `covered: "partial"`, none `covered: false`
-- `"fail"` — at least one `covered: false`
+- `"pass"` — every criterion covered
+- `"warning"` — at least one criterion partially covered, none uncovered
+- `"fail"` — at least one criterion not covered at all
 
-**`sqlAlignment.status`:**
+**`stmCompleteness.status` (the SQL ↔ STM alignment verdict):**
 - `"pass"` — no issues found
-- `"warning"` — minor discrepancies only (alias variation, cosmetic differences)
+- `"warning"` — minor discrepancies only (alias variation, cosmetic differences), OR an inference was downgraded with a gap > 15 between original and assessed confidence
 - `"fail"` — target column missing from SELECT, source table missing from FROM/JOIN, transformation expression materially wrong, or obvious syntax error that would prevent execution
+
+Note on confidence gaps: any inference you mark unsound with a gap > 15 between its original and assessed confidence raises `stmCompleteness.status` to at least `"warning"` (a gap of exactly 15 does not, on its own).
+
+**Do not set `sqlChecks.status` yourself** — that section is the BigQuery dry-run (S12) result and is owned/overridden by the bridge from the actual `execute_sql_readonly` tool result. Run the dry-run at S12 and report honestly, but know the bridge cross-checks it against the real tool output.

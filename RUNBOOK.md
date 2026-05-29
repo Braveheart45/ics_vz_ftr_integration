@@ -35,22 +35,27 @@ mini-services/claude-bridge/
   activity.js                 Activity Feed event normalisers
   tool-helpers.js             MCP tool_result canonicaliser
   output-parsers.js           SQL / STM / clarification extractors
-  structural-checks.js        L2 SQL ↔ STM checks (LLM-free)
+  release-policy.js           Release decision + validation-status helpers
   tests/                      node --test suite
   .env.example                Annotated env-var reference
 ```
 
 ### 1.3 Validation
 
-Every SQL run passes through three bridge-owned layers. SQL is emitted to the UI whenever Claude returns a fenced SQL block. If validation fails or cannot complete, the UI shows a warning and Jira completion is skipped.
+Validation runs **inside one linear Claude session**, not as separate bridge-orchestrated layers. The flow is S01 intake → S02–S08 analysis/schema/STM/design → S09 SQL generation → S10 self-audit → **S11 validator persona** (a skeptical pass that reads `skills/validator.md`, re-checks requirements coverage + inference soundness + SQL↔STM alignment, and corrects the SQL inline if a concrete mismatch is found) → **S12 dry-run** → **S13 Jira** → S14 ready.
 
-| Layer | What it checks | Verdict source | LLM in verdict? |
-|---|---|---|---|
-| **L1 Executional** | Did an observed BigQuery dry-run/read return an error? | Raw `tool_result.is_error` from any main-session dry-run/read call; `not_run` when S11 stays logical-only | No |
-| **L2 Structural** | Does the SQL implement what the STM declared? | Mechanical SQL ↔ STM comparison | No |
-| **L3 Semantic/Repair** | Does the STM cover requirements, are confidence claims sound, and does SQL implement the STM? | Fresh Claude session given requirements, SQL, STM, inferences, decisions, and scope (no chat history or tools) | Yes — cold, independent, and allowed to return corrected SQL |
+SQL is emitted to the UI whenever Claude returns a fenced SQL block. The bridge attaches a warning banner when validation did not cleanly pass.
 
-Claude's prose `validation.sqlChecks.status` is **discarded** and overwritten by the bridge-derived verdict before the UI sees it.
+The release status is the worst of:
+
+| Signal | Source | Owner |
+|---|---|---|
+| `requirementCoverage.status` | Claude's `validation` block (S11 Task 1) | Claude |
+| `stmCompleteness.status` | Claude's `validation` block (S11 Task 3) | Claude |
+| Deterministic dry-run | `deriveDryRunStatus(dryRunAttempts)` — reduces the raw `is_error` of every observed `execute_sql_readonly` to pass / fail / `not_run` | **Bridge** |
+| Premature-Jira flag | `orderingState.jiraCommentBeforeDryRun` — a Jira write before a passing dry-run pulls the run to `warning` | **Bridge** |
+
+The deterministic dry-run signal **overrides** Claude's prose `validation.sqlChecks.status` whenever they disagree, and forces a `not_run` warning if no `execute_sql_readonly` was observed at all. A hallucinated or skipped dry-run therefore cannot produce a clean release. `jiraTransition.status` and `schemaReconciliation.status` are reported in the UI but do **not** gate release (Jira failures are warnings by design; schema-reconciliation is informational).
 
 ---
 
@@ -62,7 +67,7 @@ Claude's prose `validation.sqlChecks.status` is **discarded** and overwritten by
 | Claude Code CLI | `npm install -g @anthropic-ai/claude-code` then `claude login` |
 | MCP servers | Atlassian Rovo (Jira), Google Cloud BigQuery, GitHub — configured in `~/.claude.json` |
 
-The BigQuery MCP needs read access plus the right to call `jobs.create` in dry-run mode on the target project. The Jira MCP needs comment-add and issue-transition rights — the bridge blocks Jira write tools during the main pass via `--disallowedTools` and only re-enables them in the follow-up pass.
+The BigQuery MCP needs read access plus the right to call `jobs.create` in dry-run mode on the target project. The Jira MCP needs comment-add and issue-transition rights. All MCP tools are available throughout the single linear pass; the skill controls ordering (Jira writes only at S13, after the S12 dry-run). The bridge does not gate tools with `--disallowedTools`; instead it detects and warns when a Jira write happens before a passing dry-run.
 
 Verify the toolchain before deploying:
 ```bash
@@ -98,17 +103,12 @@ The complete annotated reference lives in [`mini-services/claude-bridge/.env.exa
 | Variable | Default | Range / values | Purpose |
 |---|---|---|---|
 | `BRIDGE_PORT` | `3001` | 1–65535 | HTTP listener port |
-| `CLAUDE_MAX_TURNS` | `25` | 1–200 | Tool-use turns per main session |
+| `CLAUDE_MAX_TURNS` | `50` | 1–200 | Tool-use turns per session (the linear S01→S14 flow does ~10–18 tool calls) |
 | `CLAUDE_TIMEOUT_MS` | `1200000` | 1000–3600000 | Wall-clock cap per session (20 min) |
 | `CLAUDE_MAX_CONCURRENT` | `3` | 1–32 | Concurrent in-flight bridge requests |
 | `MAX_HISTORY_MESSAGES` | `20` | 1–500 | Recent client messages forwarded to Claude |
 | `SQL_CURATOR_MAX_REQUEST_BODY_BYTES` | `2097152` | 1024–67108864 | Max accepted request body (2 MB) |
 | `SQL_CURATOR_MAX_STREAM_BUFFER_BYTES` | `8388608` | 65536–268435456 | Bounded buffer on stream accumulators (8 MB) |
-| `SQL_CURATOR_L3_COVERAGE_CHECK` | `true` | boolean | Enable the L3 cold semantic-coverage session |
-| `SQL_CURATOR_L3_TIMEOUT_MS` | `45000` | 5000–600000 | L3 cold-session timeout |
-| `SQL_CURATOR_DEFER_JIRA_COMPLETION` | `true` | boolean | Two-pass Jira ordering |
-| `SQL_CURATOR_JIRA_COMPLETION_TIMEOUT_MS` | `120000` | 5000–1800000 | Jira follow-up pass timeout |
-| `SQL_CURATOR_JIRA_WRITE_TOOLS` | (built-in list) | comma list | Override the Jira write tools blocked during main pass |
 | `SQL_CURATOR_ENABLE_OFFLINE_DRY_RUN` | `false` | boolean | Deterministic stub for UI testing without Claude |
 | `SQL_CURATOR_LOG_LEVEL` | `info` | trace/debug/info/warn/error/fatal | pino log threshold |
 | `SQL_CURATOR_LOG_PRETTY` | `false` | boolean | Use `pino-pretty` single-line output for dev (requires `pino-pretty` package) |
@@ -213,14 +213,14 @@ Key series:
 | `requests_total` | counter | `endpoint`, `taskType` | Incoming volume |
 | `requests_succeeded` / `requests_failed` / `requests_completed_with_issue` | counter | `endpoint` | Outcome breakdown |
 | `request_duration_ms` | histogram | `endpoint` | End-to-end latency, buckets 50ms → 5min |
-| `validation_layer_result` | counter | `layer` (L1/L2/L3), `status` | Per-layer verdict counts |
+| `validation_status` | counter | `source` (stm/requirements/sql_dryrun/jira), `status` | Per-section validation outcomes |
+| `dry_run_disagreement` | counter | `claude`, `bridge` | Times Claude's self-reported dry-run disagreed with the bridge's observed verdict |
 | `claude_sessions_spawned` | counter | `kind` (primary/retry) | Process spawn volume |
 | `claude_sessions_active` | gauge | — | In-flight Claude processes |
 | `claude_sessions_aborted` | counter | `reason` (client_disconnect / pre_aborted) | Disconnect tracking |
-| `auto_retry_attempts` | counter | `reason` (missing_sql) | Auto-retry rate |
+| `auto_retry_attempts` | counter | `reason` (missing_sql / max_turns) | Auto-retry rate |
 | `idempotency_collision` | counter | `state` (in_flight / completed) | Double-submit attempts |
 | `stream_buffer_overflow` | counter | `accumulator` | Buffer-cap hits |
-| `l3_coverage_outcome` | counter | `result` (timeout / no_block / parse_error) | L3 reliability |
 | `requests_client_disconnect` | counter | `endpoint` | Client-side aborts mid-stream |
 
 To transform to Prometheus exposition format, add a small adapter — `metrics.snapshot()` returns plain JSON.
@@ -230,8 +230,8 @@ To transform to Prometheus exposition format, add a small adapter — `metrics.s
 Structured JSON to stdout (pino). Every per-request log line carries:
 - `requestId` — short hex generated at HTTP entry, echoed in the `X-Request-Id` response header
 - `sessionId` — first 8 chars of the client-supplied session id
-- `component` — `bridge` / `request` / `claude-session` / `l3-coverage`
-- `phase` — additional sub-operation tag (e.g. `l3-coverage`)
+- `component` — `bridge` / `request` / `claude-session`
+- `phase` — additional sub-operation tag
 
 Grep one run end-to-end with `requestId=<id>`:
 ```bash
@@ -278,14 +278,15 @@ After deploying a new version:
    ```bash
    cd /opt/sql-curator/mini-services/claude-bridge
    npm test
-   # expect: tests 87 / pass 87 / fail 0
+   # expect: tests 85 / pass 85 / fail 0
    ```
 
-4. **End-to-end smoke** — trigger one minimal SQL run from the UI, watch Activity Feed surface:
-   - L1 card (`BigQuery Dry-Run — pass` from `source: bigquery`)
-   - L2 card (`SQL ↔ STM Structural Check — pass` from `source: bridge`)
-   - L3 card (`Requirements Coverage — pass` from `source: bridge`)
-   - SQL appears in the editor only after all three pass.
+4. **End-to-end smoke** — trigger one minimal SQL run from the UI, watch Activity Feed surface the single linear pass:
+   - Intake → Analysis → Schema (with candidate-table rationale cards) → Mapping & SQL Generation
+   - A validator-persona card (`source: claude`) reporting requirements coverage + SQL↔STM alignment
+   - A dry-run result; the bridge attaches a warning banner if the dry-run failed or was skipped
+   - A Jira card (`comment posted, status → In Progress`) for Jira-backed runs
+   - SQL appears in the editor; a warning banner is shown when validation did not cleanly pass.
 
 5. **Logs are JSON**
    ```bash
@@ -312,12 +313,14 @@ sudo -u sql-curator bash -lc 'claude --version'
 
 If missing, install globally as the runtime user and ensure `npm bin -g` is on its PATH.
 
-### 9.3 SQL never surfaces despite a passing dry-run in the UI
-The Activity Feed will show which layer blocked. Most common causes:
+### 9.3 SQL surfaced with a validation warning
+SQL always surfaces when a fenced SQL block exists; the banner explains why it was not marked clean. Most common causes:
 
-- **L2 fail** — STM declares a target column that's missing from the SQL's outermost SELECT, or a source table the SQL doesn't reference. Fix the STM or the SQL; regenerate.
-- **L3 fail** — STM is missing rows for an acceptance criterion. The cold session lists missing criteria in its activity card. Add the missing rows.
-- **L1 not_run** — Claude followed the logical-only S11 path and did not invoke a BigQuery dry-run/read tool. SQL should still surface with a validation warning if a fenced SQL block exists.
+- **Dry-run skipped (`not_run`)** — Claude never invoked `execute_sql_readonly` at S12. The bridge forces a warning and a `Mandatory Dry-Run Was Skipped` card. Re-run, or dry-run the SQL manually before use.
+- **Dry-run fail** — the last observed `execute_sql_readonly` returned an error. A `Dry-Run Verdict Corrected by Bridge` card appears if Claude had claimed pass. Fix the SQL and regenerate.
+- **`stmCompleteness` fail** — Claude's S11 validator persona found a target column missing from the SELECT, a source table not referenced, or a materially wrong transformation. The validator card lists the specific mismatch.
+- **`requirementCoverage` fail** — an acceptance criterion has no covering STM row. The validator card lists the uncovered criteria.
+- **`Jira Written Before Validation`** — a Jira write was observed before a passing dry-run; the run is pulled to warning even if everything else passed.
 
 ### 9.4 `degraded_capacity` on `/health`
 All concurrency slots taken. Either:
@@ -334,13 +337,13 @@ All concurrency slots taken. Either:
 A Claude session exceeded the 8 MB accumulator cap. Almost always means an MCP tool returned an oversized payload. Check the Activity Feed for the abort card and Claude session logs for the offending tool call. Raise `SQL_CURATOR_MAX_STREAM_BUFFER_BYTES` only if the response is legitimately large.
 
 ### 9.7 Jira comment did not post
-Two-pass Jira completion has a verification step: after the follow-up session exits, the bridge checks that `addCommentToJiraIssue` and `transitionJiraIssue` were actually invoked. If not, a `Jira Update Skipped` error card appears in the Activity Feed.
+Jira completion (S13) runs inline at the end of the single pass. If `addCommentToJiraIssue` / `transitionJiraIssue` were not invoked, `validation.jiraTransition.status` is reported as `not_run`/`warning` and the Jira card reflects it.
 
 ```bash
-journalctl -u sql-curator-bridge | jq 'select(.component == "jira-followup")' | head
+journalctl -u sql-curator-bridge | jq 'select(.component == "claude-session")' | head
 ```
 
-Confirm: Jira write tools are not in `--disallowedTools` for the follow-up; the issue is reachable; the user has comment + transition permissions.
+Confirm: the issue is reachable and the user has comment + transition permissions. Note a Jira write seen *before* a passing dry-run triggers a `Jira Written Before Validation` warning — the comment may not reflect the validated SQL.
 
 ### 9.8 Session-related issues
 ```bash
@@ -381,7 +384,7 @@ For pid-level isolation between old and new contract behaviour during a rollout 
 
 - The bridge binds to `127.0.0.1` by default. Do not expose it directly to the internet.
 - All MCP credentials live in `~/.claude.json` under the systemd user — not in environment variables or repo files.
-- `--dangerously-skip-permissions` is used to auto-approve MCP tool calls (the bridge runs headlessly). The Jira write-tool block via `--disallowedTools` is the explicit guard against premature Jira writes.
+- `--dangerously-skip-permissions` is used to auto-approve MCP tool calls (the bridge runs headlessly). All MCP tools — including Jira writes — are therefore available for the entire pass; there is **no** `--disallowedTools` gate. Ordering (Jira writes only at S13, after a passing dry-run) is enforced by the skill, not the tool layer. A premature Jira write is detected and surfaced as a warning **after the fact** — it is not prevented. If your deployment cannot tolerate a Jira write against unvalidated SQL, that residual risk must be accepted or mitigated out of band.
 - Request bodies are capped at `SQL_CURATOR_MAX_REQUEST_BODY_BYTES`. Stream accumulators capped at `SQL_CURATOR_MAX_STREAM_BUFFER_BYTES`. No user input is `eval`'d.
 - HTTP errors return structured envelopes (`{error: {code, message, ...}}`) with no stack traces.
 

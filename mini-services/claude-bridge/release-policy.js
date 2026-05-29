@@ -19,6 +19,56 @@ function normalizeStatus(status) {
 }
 
 /**
+ * Normalise a single validation *section* status. Unlike `normalizeStatus`,
+ * an unrecognised value defaults to `'warning'` (not `'not_run'`): a section
+ * that reports an unknown status is suspect and should pull the run toward a
+ * warning rather than silently disappearing.
+ * @param {*} status
+ * @returns {'pass'|'warning'|'fail'|'not_run'}
+ */
+function normalizeValidationStatus(status) {
+  const normalized = String(status || '').toLowerCase();
+  return ALLOWED.has(normalized) ? normalized : 'warning';
+}
+
+/**
+ * Combine several validation-section statuses into one, worst-wins.
+ * Precedence: fail > warning > not_run > pass. Empty input → 'not_run'.
+ * @param {Array<*>} statuses
+ * @returns {'pass'|'warning'|'fail'|'not_run'}
+ */
+function combineValidationStatuses(statuses) {
+  const values = (statuses || []).map(normalizeValidationStatus).filter(Boolean);
+  if (values.length === 0) return 'not_run';
+  if (values.includes('fail')) return 'fail';
+  if (values.includes('warning')) return 'warning';
+  if (values.includes('not_run')) return 'not_run';
+  return 'pass';
+}
+
+/**
+ * Derive a DETERMINISTIC dry-run status from the raw BigQuery tool results the
+ * bridge captured during the pass — independent of whatever Claude self-reports
+ * in validation.sqlChecks.status. This is the bridge-owned signal that a
+ * hallucinated or skipped dry-run cannot fake.
+ *
+ *   - no attempts captured       → 'not_run' (S12 was skipped — must warn)
+ *   - last captured attempt errored → 'fail'
+ *   - otherwise                   → 'pass'
+ *
+ * "Last attempt wins" because auto-fix retries converge on the final SQL; the
+ * last execute_sql_readonly result reflects the SQL actually released.
+ *
+ * @param {Array<{isError?:boolean}>} dryRunAttempts
+ * @returns {'pass'|'fail'|'not_run'}
+ */
+function deriveDryRunStatus(dryRunAttempts) {
+  if (!Array.isArray(dryRunAttempts) || dryRunAttempts.length === 0) return 'not_run';
+  const last = dryRunAttempts[dryRunAttempts.length - 1];
+  return last && last.isError ? 'fail' : 'pass';
+}
+
+/**
  * @param {Object} input
  * @param {boolean} input.hasSqlBlock
  * @param {boolean} [input.isClarify]
@@ -58,4 +108,7 @@ function decideSqlRelease({
 module.exports = {
   decideSqlRelease,
   normalizeStatus,
+  normalizeValidationStatus,
+  combineValidationStatuses,
+  deriveDryRunStatus,
 };
