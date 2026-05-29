@@ -11,7 +11,7 @@ The UI is a presentation shell. Requirement inference, schema reconciliation, SQ
 
 Scope is SQL generation only. Legacy SQL conversion, dialect translation, and rewrite tasks are intentionally out of scope.
 
-For day-to-day operations, see [RUNBOOK.md](RUNBOOK.md). For Claude's runtime contract, see [skills/generator.md](skills/generator.md).
+For day-to-day operations, see [RUNBOOK.md](RUNBOOK.md). For Claude's runtime contract, see the spine [skills/sql-curator/SKILL.md](skills/sql-curator/SKILL.md) (with its [references/](skills/sql-curator/references/) and the [contracts/](contracts/) shapes).
 
 ---
 
@@ -33,14 +33,14 @@ The browser never talks to Jira, BigQuery, GitHub, or MCP servers directly. Next
 
 ## Current Workflow
 
-Claude Code runs the app skill from [skills/generator.md](skills/generator.md) on every request. The current runtime is a single linear S01-S14 flow:
+Claude Code runs the app skill — the spine [skills/sql-curator/SKILL.md](skills/sql-curator/SKILL.md) plus its references and contracts, composed by `mini-services/claude-bridge/prompt-assembler.js` — on every request. The current runtime is a single linear S01-S14 flow:
 
 1. Intake Jira, uploaded text, and free-text context.
 2. Apply the mandatory BigQuery target scope: `projectId.datasetId`.
 3. Reconcile schema only inside the supplied target dataset.
 4. Build the STM before writing SQL.
 5. Generate BigQuery SQL from the STM.
-6. Validate inside the same session using the S11 neutral validator persona from [skills/validator.md](skills/validator.md).
+6. Validate inside the same session using the S11 neutral validator persona from [skills/validator/SKILL.md](skills/validator/SKILL.md), backed by the bridge's deterministic STM↔SQL structural check.
 7. Run a mandatory BigQuery dry-run in S12.
 8. For Jira-backed runs, post a Jira comment and transition the issue to `In Progress` in S13.
 9. Emit SQL, STM, structured validation JSON, and `[SQL_READY]`.
@@ -64,15 +64,20 @@ mini-services/claude-bridge/      Local Claude Code HTTP/SSE bridge
   logging.js                      pino-backed structured logging
   metrics.js                      Counters, gauges, histogram snapshots
   request-validation.js           Bridge request validation
-  release-policy.js               SQL release and warning policy
+  release-policy.js               SQL release + validation-status helpers
+  structural-checks.js            Deterministic STM <-> SQL structural check
+  prompt-assembler.js             Composes the prompt from skills/ + contracts/
   activity.js                     Activity Feed normalization
   tool-helpers.js                 MCP tool_result parsing helpers
   output-parsers.js               SQL/STM/validation/activity extractors
   tests/                          node --test unit tests
 
 skills/
-  generator.md                    Main Claude Code runtime contract
-  validator.md                    S11 validator persona contract
+  sql-curator/SKILL.md            Orchestration spine (S01-S14)
+  sql-curator/references/         Stage detail (confidence gate, schema, idioms, clarification)
+  validator/SKILL.md              S11 validator persona
+  validator/references/           Validator rubric detail
+contracts/                        STM / validation / activity JSON-Schema shapes
 
 AGENTS.md                         Coding-agent instructions
 RUNBOOK.md                        Operational runbook
@@ -282,7 +287,7 @@ npm test
 ## Contributing
 
 - Keep business logic out of the UI.
-- Keep `skills/generator.md` focused on Claude runtime behavior.
+- Keep the skill files (`skills/sql-curator/`, `skills/validator/`) focused on Claude runtime behavior; author stage detail in a `references/` file, not the spine.
 - Do not add external APIs, custom Jira/BigQuery/GitHub connectors, cloud services, or backend orchestration for this POC.
 - Preserve mandatory BigQuery project and dataset collection.
 - Follow [AGENTS.md](AGENTS.md) for coding-agent instructions.

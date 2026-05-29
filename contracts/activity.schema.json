@@ -1,0 +1,38 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://sql-curator/contracts/activity.schema.json",
+  "title": "SQL Curator — inline streaming activity block",
+  "description": "Shape of each fenced ```activity block the agent streams. The bridge scans streaming text for these blocks and forwards each as an SSE activity_event. Enums here MUST equal ACTIVITY_TYPES / ACTIVITY_STATUSES / ACTIVITY_SOURCES in mini-services/claude-bridge/activity.js and the stage set the UI groups by.",
+  "type": "object",
+  "required": ["stage", "type", "status", "title", "summary", "source"],
+  "additionalProperties": false,
+  "properties": {
+    "stage": {
+      "type": "string",
+      "enum": ["intake", "analysis", "schema_resolution", "sql_generation", "validation", "ready"]
+    },
+    "type": {
+      "type": "string",
+      "enum": ["summary", "observation", "inference", "decision", "validation", "error", "artifact"],
+      "description": "Never 'tool' — describe what was learned from a tool result, not that a tool was called."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["running", "completed", "warning", "failed", "blocked", "pending"]
+    },
+    "title": { "type": "string" },
+    "summary": { "type": "string" },
+    "details": { "type": "array", "items": { "type": "string" } },
+    "evidence": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Required for type 'inference' and 'decision': source rows, table/column names, or quoted requirement phrases."
+    },
+    "confidence": { "type": "integer", "minimum": 0, "maximum": 100 },
+    "timestamp": { "type": "integer" },
+    "source": {
+      "type": "string",
+      "enum": ["claude", "bridge", "jira", "bigquery", "github", "offline", "fallback"]
+    }
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://sql-curator/contracts/stm.schema.json",
+  "title": "SQL Curator — Source-to-Target Map (STM)",
+  "description": "Shape of the fenced ```stm JSON block. Field names here are the exact keys the bridge parser reads in output-parsers.js extractStm(). Changing a name here is an interface change and must be made in lockstep with the parser and the skill references.",
+  "type": "object",
+  "required": ["rows"],
+  "additionalProperties": false,
+  "properties": {
+    "title": { "type": "string" },
+    "description": { "type": "string" },
+    "rows": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/stmRow" }
+    }
+  },
+  "definitions": {
+    "stmRow": {
+      "type": "object",
+      "required": [
+        "sourceField",
+        "sourceTable",
+        "sourceType",
+        "targetColumn",
+        "targetTable",
+        "targetType",
+        "transformation",
+        "businessRule",
+        "notes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "sourceField": { "type": "string", "description": "Source column name" },
+        "sourceTable": { "type": "string", "description": "Fully qualified project.dataset.table where known" },
+        "sourceType": { "type": "string", "description": "BigQuery source type, e.g. STRING / INT64" },
+        "targetColumn": { "type": "string", "description": "Output column; must match the SELECT-list AS alias exactly" },
+        "targetTable": { "type": "string", "description": "Fully qualified target object" },
+        "targetType": { "type": "string", "description": "BigQuery target type" },
+        "transformation": { "type": "string", "description": "Expression or derivation producing the target column" },
+        "businessRule": { "type": "string", "description": "Business rule, filter, join, or aggregation meaning" },
+        "notes": { "type": "string", "description": "Assumption / confidence / validation note" }
+      }
+    }
+  }
+}

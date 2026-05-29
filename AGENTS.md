@@ -13,9 +13,9 @@ SQL Curator is a minimalist local UI over Claude Code for BigQuery SQL generatio
 - Do not claim support for PDF, DOCX, XLSX, or PPTX unless real extraction is implemented.
 
 ## Runtime Contract
-- The app runtime skill is `skills/generator.md`.
-- The bridge loads that skill on each SQL Curator request and embeds it in the Claude Code prompt.
-- Keep `skills/generator.md` focused on Claude runtime behavior, not React/UI implementation details.
+- The app runtime skill is the spine `skills/sql-curator/SKILL.md` plus its `references/` and the `contracts/` shapes; the S11 validator persona is `skills/validator/SKILL.md`.
+- The bridge composes these into the Claude Code prompt on each request via `mini-services/claude-bridge/prompt-assembler.js` (the single composition seam) — it does not paraphrase skill content.
+- Keep the skill files focused on Claude runtime behavior, not React/UI implementation details. Add a stage's detail to a `references/` file, not the spine; add a new warehouse dialect as a new `references/<dialect>-idioms.md`.
 - For Jira-backed SQL generation, Claude Code must fetch the Jira story, generate SQL from STM, validate, post a Jira comment, transition Jira to `In Progress`, and report results in the structured validation payload.
 
 ## UI Rules

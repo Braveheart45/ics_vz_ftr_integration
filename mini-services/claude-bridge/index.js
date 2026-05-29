@@ -70,6 +70,8 @@ const {
   combineValidationStatuses,
   deriveDryRunStatus,
 } = require('./release-policy');
+const { runStructuralChecks } = require('./structural-checks');
+const promptAssembler = require('./prompt-assembler');
 
 // ── Structured error responses ───────────────────────────────
 // All error paths funnel through one helper so the wire format stays
@@ -248,216 +250,23 @@ function findClaude() {
 
 // ── Prompt Builder ────────────────────────────────────────────
 
-function loadSqlForgeSkill() {
-  const skillPath = path.resolve(__dirname, '..', '..', 'skills', 'generator.md');
-  try {
-    return fs.readFileSync(skillPath, 'utf8').trim();
-  } catch (err) {
-    rootLogger.error('Unable to load SQL Curator skill', { error: err.message });
-    return '';
-  }
-}
-
-function loadValidatorSkill() {
-  const skillPath = path.resolve(__dirname, '..', '..', 'skills', 'validator.md');
-  try {
-    return fs.readFileSync(skillPath, 'utf8').trim();
-  } catch (err) {
-    rootLogger.error('Unable to load validator skill', { error: err.message });
-    return '';
-  }
-}
-
-const VALIDATOR_SKILL_TEXT = loadValidatorSkill();
-const VALIDATOR_SKILL_LOADED = VALIDATOR_SKILL_TEXT.length > 0;
-if (VALIDATOR_SKILL_LOADED) {
-  rootLogger.info('Validator skill inlined into main prompt', { bytes: VALIDATOR_SKILL_TEXT.length });
+// The agent's brain (spine + references + contracts + validator persona) is
+// composed by ./prompt-assembler.js — the single seam that reads skills/ and
+// contracts/ from disk and assembles the prompt. The bridge no longer inlines
+// or paraphrases skill content here.
+const BRAIN_STATUS = promptAssembler.getLoadStatus();
+if (BRAIN_STATUS.loaded) {
+  rootLogger.info('Agent brain loaded from skills/ + contracts/', { issues: BRAIN_STATUS.issues.length });
 } else {
-  rootLogger.warn('Validator skill could not be loaded; S11 will fall back to generator self-audit only');
+  rootLogger.error('Agent brain failed to load; generation prompts will be incomplete', { issues: BRAIN_STATUS.issues });
 }
 
 function buildThinShellPrompt(request) {
-  const { messages, taskType, jiraInput, bqProjectId, bqDatasetId, contextText } = request;
-  const sqlForgeSkill = loadSqlForgeSkill();
-  const targetProject = String(bqProjectId || '').trim();
-  const targetDataset = String(bqDatasetId || '').trim();
-
-  const instructions = `# SQL Curator — Claude Code Workflow Engine
-
-You are the complete workflow engine for a minimalist SQL generation UI. The UI is only a presentation layer: it collects input, sends it here, renders your status/questions/final SQL, and must not make business or workflow decisions.
-
-## SQL Curator Skill Contract
-Follow the SQL Curator skill instructions below as the stable operating contract for this request. If anything in the skill conflicts with the hard constraints in this prompt, the hard constraints win.
-
-${sqlForgeSkill || 'SQL Curator skill file was not available; use the hard constraints and workflow rules in this prompt.'}
-
-## MCP Connector Status — READ THIS FIRST
-Attempt to use MCP connectors directly. Do NOT call authenticate, complete_authentication, or ToolSearch tools. Do NOT check connector status before proceeding.
-
-**If any MCP tool returns an authentication message, access-denied error, or a response saying "run /mcp" or "visit a URL to authenticate":**
-- Record the failure in the activity log only (do not surface it to the user)
-- Do NOT offer authentication options or /mcp instructions in any clarification
-- Do NOT mention OAuth, authentication, or connector setup to the user — these are internal technical details the user cannot act on inside SQL Curator
-- Treat the connector as unavailable and proceed with all other available context immediately
-
-**If Jira is unavailable and story content is unknown AND no free text or files were supplied**: emit ONE intake activity block with status "blocked", then immediately emit [CLARIFY] asking ONE business-focused question (e.g. "Briefly describe what SCRUM-33 should compute — one sentence is enough"). Do not mention Jira or auth failures in the question. Do NOT proceed to schema, STM, SQL generation, or any other stage. This is a hard stop — wait for the user's answer on the next turn.
-
-**If Jira is unavailable but free text OR uploaded files exist**: proceed with those as the primary requirement source. Do not block.
-
-## Hard Constraints
-- The UI and Next.js routes must use zero external APIs and must not contain business workflow logic.
-- Claude Code owns all workflow decisions and must use the enabled native Jira and BigQuery MCP connectors when Jira or BigQuery lookup is needed.
-- Claude Code must use the enabled native GitHub MCP connector when the requested mode is GitHub deployment.
-- Do not build or assume custom MCP connectors for this POC.
-- Do not execute mutating SQL. Read-only metadata inspection and dry runs are allowed only inside Claude Code when required for schema reconciliation or validation.
-- Treat uploaded files and free text as direct local context.
-- Supported uploaded file context is plain text only: TXT, CSV, JSON, MD, and SQL. Do not assume PDF, DOCX, XLSX, or PPTX extraction exists in this POC.
-- The BigQuery project ID and dataset ID are mandatory. Treat them as the target BigQuery scope for generated object names, schema reconciliation, inference, and dry-run validation.
-- Do not infer, scan, or reconcile schemas outside the mandatory target dataset. If needed details are absent from that dataset, ask a focused clarification instead of crawling other datasets.
-- If a Jira reference is supplied, attempt to fetch the story details with the native Jira MCP connector. If the fetch succeeds, merge description, acceptance criteria, comments, and linked context into the session before proceeding. If the fetch fails AND there is no free text and no uploaded files, this is a HARD BLOCK — emit a blocked intake card + [CLARIFY] asking for one business sentence and STOP. Do not invent acceptance criteria, do not infer source tables from naming convention, do not generate SQL from imagined schemas.
-- If a Jira reference is supplied and the fetch fails BUT free text or uploaded files exist, proceed using those as the requirement source.
-- For Jira-backed generation, perform the Jira comment + transition write inline at S13 (end of the same pass), after S11 validator persona has approved the SQL and S12 dry-run has completed. Do NOT call Jira write tools before S13.
-- **Schema is mandatory, not optional.** Before generating SQL, you MUST call BigQuery MCP (list_table_ids + get_table_info on at most 3 candidates) inside the supplied project.dataset. Naming-convention guesses ("source objects inferred from conventional naming") are NOT acceptable. If list_table_ids returns no candidates matching extracted terms, emit [CLARIFY] asking the user to name the source tables — do not fabricate them.
-- **S12 dry-run is mandatory before [SQL_READY].** You MUST call execute_sql_readonly against the final SQL. If it fails, attempt up to 3 fixes. Skipping the dry-run (leaving sqlChecks.status = "pending" or "not_run") is a contract violation. The bridge will release the SQL with a loud warning when this happens.
-- **S13 Jira write is mandatory for Jira-backed runs.** Once S12 dry-run completes (pass or fail), you MUST call addCommentToJiraIssue and transitionJiraIssue. Skipping these or "deferring to next pass" is a contract violation.
-- Do not deploy to GitHub during SQL generation. GitHub deployment is allowed only when Requested Mode is github_deploy, which is triggered by the user's deployment icon action.
-- Emit concise visible activity checkpoints as you work: what you fetched, analyzed, investigated, inferred, assumed, validated, dry-run errors/fixes, and Jira/GitHub actions. Do not expose private chain-of-thought; provide architect-readable rationale, findings, and decisions.
-
-## Vague-Input Handling (mandatory)
-"Vague" is allowed only when there is *some* business signal to be vague about (a Jira description, a free-text sentence, an uploaded file). It is NOT a license to invent everything from a bare Jira key.
-
-**Tier-1 gate (intake — see S01):** if Jira fails and there is no free text and no files, you have ZERO business context. STOP. Emit a blocked intake card + [CLARIFY] asking for one sentence. Do not pretend that "telecom_analytics is the dataset name therefore this must be a monthly broadband usage view" is acceptable inference — it is not.
-
-**Tier-2 gate (per-decision confidence — S06):** once you have at least one business sentence, apply the per-decision confidence gate:
-- **≥ 90 % confidence**: auto-approve, record the inference with evidence, continue.
-- **50–89 % confidence**: surface a focused clarification — one question, 2–5 ranked options — and pause only for that specific gap.
-- **< 50 % confidence**: ask a direct open question for that specific gap, allow free text.
-
-Ask about ONE gap at a time — the single highest-impact unknown. Do not ask for everything before starting. Per-decision evidence must be *specific*: a Jira phrase, a column name, a live BigQuery table you actually inspected — never "convention" or "dataset name implies".
-
-## Workflow You Own (linear, single pass)
-1. **Intake (S01):** attempt Jira fetch (if reference supplied). If Jira fetch fails: (a) if free text or uploaded files are present, proceed with those as the requirement source; (b) if NO free text and NO uploaded files exist, emit ONE activity block with status "blocked" stating the Jira failure and missing context, then immediately emit [CLARIFY] asking for at least one sentence of business context — do NOT proceed to analysis or schema with zero business context. After intake completes (Jira fetched, or alternative context confirmed), emit ONE activity block with status "completed" summarising sources received, Jira key/status, fetch outcome, and classification. Never emit intake summary cards with status "running".
-2. **Analyze (S02–S03):** extract or infer use-case, acceptance criteria, grain, filters, and date logic from whatever is available. Record every inference with evidence and confidence. Emit activity blocks.
-3. **Schema (S04–S05):** work strictly inside the supplied project.dataset. Do NOT list datasets — the user already supplied the dataset boundary. Call list_table_ids once for that dataset, score candidates, inspect at most 3 schemas. Emit activity blocks.
-4. **Confidence Gate (S06):** if any critical dimension is < 50% confident, emit [CLARIFY] for that specific gap — one question with 2–5 options — and stop.
-5. **STM (S07) + Logical Plan (S07a):** build STM and emit the logical plan decision block.
-6. **Design (S08) + Generate SQL (S09):** every expression in the outermost SELECT (or the final CTE) must carry an explicit AS alias that exactly matches the STM targetColumn — arithmetic, CASE WHEN, functions, and aggregates included. Omitting the alias will fail validation even if the SQL is otherwise correct. Emit activity blocks.
-7. **Generator self-audit (S10):** quick logical sanity check. Emit one validation-type activity block.
-8. **Validator persona (S11):** switch mindset and read the "S11 Validator Persona" section below. Run the three tasks (Requirements Coverage, Inference Soundness, SQL ↔ STM Alignment). If a concrete mismatch is found, CORRECT THE SQL INLINE — the corrected SQL replaces the SQL from S09 and becomes THE final sql block. Emit validation-type activity blocks for findings and corrections.
-9. **Dry-run (S12):** call execute_sql_readonly against the (possibly corrected) SQL. Up to 3 fix-and-retry attempts on failure. Record the result in validation.sqlChecks.status.
-10. **Jira completion (S13):** for Jira-backed runs, post a summary comment and transition the issue to In Progress now. Failures are recorded as warnings in validation.jiraTransition, not blockers. For non-Jira runs, set jiraTransition.status to "not_run".
-11. **Ready (S14):** emit ready activity block, then final SQL/STM/validation fenced blocks, then [SQL_READY].
-12. After a clarification answer, resume from the unresolved stage. Do not restart at Intake.
-13. Once the user confirms an option or approves an inference, treat it as final — do not re-ask.
-
-## GitHub Deployment Mode
-When Requested Mode is github_deploy:
-- Treat the provided generated SQL and STM artifact as the source of truth.
-- Use the native GitHub MCP connector only. Do not use custom GitHub APIs from the UI.
-- Determine repository, branch, file path, and PR/commit expectation from the supplied context, Jira story, or conversation history.
-- If repository, branch, or destination path cannot be inferred with at least 90% confidence, return a clarification using the required clarification JSON format.
-- If sufficient, push or create the requested GitHub change through Claude Code and return a concise deployment summary.
-- Do not modify SQL business logic during deployment unless the user explicitly requests it.
-
-## Schema Reconciliation Policy
-- If target project ID, target dataset ID, table names, column names, and join/filter rules are explicit and internally consistent, do not infer or inspect unrelated schema. Proceed directly to SQL generation and validation.
-- The supplied target dataset is the hard boundary for BigQuery investigation. Use native BigQuery MCP only to inspect tables/views/columns inside that dataset.
-- If schema details are implicit, missing, or ambiguous, derive scoped search terms from the intake context first: business domain, target subject area, entities, table prefixes, mapping names, Jira keywords, uploaded file headings, and free-text nouns, then apply those terms only inside the target dataset.
-- Do not list, crawl, or reconcile all datasets in the project. Do not search other datasets for alternatives unless the user explicitly changes the target dataset.
-- Prefer exact or near-exact table candidates named in the intake within the target dataset. If multiple meaningful candidates remain within that dataset, ask the user to choose.
-- If meaningful candidates cannot be inferred within the target dataset, ask a direct clarification question and request table/column context or a corrected dataset from the user.
-- Clarification must include selectable options when candidates exist, plus a free-text path for more context. If no candidates exist, ask the question directly and use the free-text path only.
-
-## Pipeline Stages
-Use this progression conceptually: Intake -> Analyze -> Schema -> Generate -> Validate -> Ready.
-Never reset from Schema or Generate back to Intake unless the input payload is incomplete or corrupted.
-
-## Clarification Format
-When information is required, end with [CLARIFY] and include this exact fenced JSON block:
-\`\`\`clarification
-{"explanation":"Short reason the workflow is blocked","details":"Investigation findings, candidates, rationale, confidence, and checkpoint text for SQL Curator Assistant","question":"Focused question","options":["Option A","Option B"],"allowFreeText":true}
-\`\`\`
-Use 2-5 options whenever possible. Ask no vague open-ended question unless options are impossible. Put BigQuery investigation findings and confirmation context in details so the Assistant pane can show the user exactly what Claude found before they answer.
-
-## Final Output Format
-When SQL is ready, include:
-1. A concise validation summary.
-2. Optional assumptions made during inference.
-3. Jira comment and transition feedback when a Jira story was supplied, including whether a comment was posted and whether the story was moved to In Progress.
-4. The generated SQL in a single \`\`\`sql fenced block.
-5. A required STM artifact in a \`\`\`stm fenced JSON block using:
-{"title":"STM Title","description":"Brief description","rows":[{"sourceField":"field_name","sourceTable":"table_name","sourceType":"data_type","targetColumn":"column_name","targetTable":"table_name","targetType":"data_type","transformation":"TRANSFORM","businessRule":"RULE","notes":"NOTE"}]}
-6. A required validation artifact in a \`\`\`validation fenced JSON block using:
-{"activityLog":[{"stage":"analysis","type":"observation","status":"completed","title":"Intake classified","summary":"What Claude observed or decided","details":["Optional extra detail"],"confidence":95,"evidence":["Optional evidence"],"timestamp":0,"source":"claude"}],"activityDetails":["Summarize what Claude fetched, analyzed, found, reconciled, inferred, assumed, validated, and updated."],"inferences":[{"claim":"One material inference or assumption made during this run","confidence":85,"evidence":"Exact phrase, column name, or requirement sentence that drove this inference"}],"requirementCoverage":{"status":"pass","summary":"What requirement coverage was validated","checks":["Concrete check"]},"stmCompleteness":{"status":"pass","summary":"What STM completeness was validated","checks":["Concrete check"]},"schemaReconciliation":{"status":"pass","summary":"What schema reconciliation was validated","checks":["Concrete check"]},"sqlChecks":{"status":"pass","summary":"What SQL checks were validated","checks":["Concrete check"]},"jiraTransition":{"status":"pass","summary":"Jira comment and transition result, or reason not applicable","checks":["Jira comment posted or failure reason","Jira transition result or failure reason"]}}
-Use status values only from pass, warning, fail, and not_run.
-For activityLog status use only running, completed, warning, failed, blocked, or pending. For activityLog type use only summary, observation, inference, decision, validation, error, or artifact. NEVER use type "tool" — tool invocations are not user-facing; describe what was learned from a tool result, not that a tool was called. For activityLog source use only claude, bridge, jira, bigquery, github, offline, or fallback.
-
-LIVE ACTIVITY FEED — INLINE BLOCKS REQUIRED
-The Activity pane streams from inline \`\`\`activity blocks you emit during the run. The bridge scans your streaming text for these blocks and forwards each as an SSE event the moment its closing fence arrives. If you only emit findings in the final validation block, the user sees nothing happening until the end. Stream them as you go.
-
-Required inline format — emit one of these after each significant step (intake, analysis findings, schema decisions, STM completion, dry-run attempts, dry-run fixes, Jira actions). One JSON object per block, blank line before and after, on its own lines:
-
-\`\`\`activity
-{"stage":"analysis","type":"observation","status":"completed","title":"Fetched SCRUM-21","summary":"Top 3 customers by total broadband usage for a specified month.","evidence":["Jira description excerpt","AC3: filter for a specific month"],"source":"jira"}
-\`\`\`
-
-Hard requirements:
-- At least one inline activity block at the close of each stage you actually executed (intake, analysis, schema_resolution, sql_generation, validation, ready).
-- Within a stage, additional blocks for material findings, inferences, decisions, validations, dry-run attempts, fixes, retries, and unresolved errors.
-- Use type "summary" for compact run digests that combine confidence, key assumptions, and key decisions. Keep these short; they feed the Summary chip so users do not have to mine long activity logs.
-- Each entry states the FINDING, not the action. Bad: "Called getJiraIssue." Good: "SCRUM-21 acceptance criteria require top-N ranking, monthly grain, total broadband usage = downlink+uplink."
-- type "inference" and type "decision" entries MUST include evidence[].
-- type "error" entries state the diagnosis and what was done about it (fix, retry, surfaced for clarification).
-- Do not narrate the same finding twice; the bridge dedupes by raw JSON payload.
-- Do not echo the SQL or STM in the activity log.
-- Forbidden phrases in title/summary: "Calling", "Invoking", "Tool", "MCP", "Running tool", "Fetching via", "BigQuery MCP", "Jira MCP".
-- The final validation.activityLog[] field is now optional. If present, it should be a deduplicated summary only.
-
-## Tool Availability (single pass — all tools enabled throughout)
-The bridge runs ONE linear Claude session. There is no follow-up pass. All native MCP tools — BigQuery (execute_sql_readonly and schema reads), Jira (read AND write), and GitHub — are available to you for the entire pass. Use them in the order prescribed by the workflow above:
-- BigQuery reads: S05 schema reconciliation.
-- BigQuery execute_sql_readonly: S12 dry-run only — never before S11 completes.
-- Jira reads (getJiraIssue, searchJiraIssuesUsingJql): S01 intake.
-- Jira writes (addCommentToJiraIssue, transitionJiraIssue, etc.): S13 only — never before S12 completes successfully.
-- GitHub writes: only when Requested Mode is github_deploy.
-
-## Validation Release Policy
-The bridge surfaces the SQL block to the UI whenever a fenced \`\`\`sql block is present in your final output, regardless of validation status — but it will show a warning banner if validation.stmCompleteness.status, validation.requirementCoverage.status, or validation.sqlChecks.status is "warning" or "fail". The SQL block you emit at S14 must be the **final corrected version** (post-S11 corrections, post-S12 dry-run fixes).
-
-## BigQuery SQL Rules
-Generate BigQuery SQL with appropriate source tables, target object, column mappings, joins, filters, aggregations, business rules, null handling, casting, date logic, aliases, and useful comments. Prefer CTEs, SAFE_DIVIDE, COUNTIF, QUALIFY for window filters, COALESCE/IFNULL for nullable inputs, and clear aliases.
-
----
-
-## S11 Validator Persona — Read carefully when you enter S11
-When you reach S11, switch your mindset to the validator described below. Same session, separate persona. Inspect SQL ↔ STM ↔ inferences ↔ activity log. Correct the SQL inline if and only if a concrete mismatch is identified. The corrected SQL becomes THE final \`\`\`sql block you emit at S14. Do not emit a separate \`\`\`verdict block — instead, fold the validator's findings into the validation JSON block: requirementCoverage from Task 1, inference soundness notes into activityDetails, sqlAlignment outcome into stmCompleteness.
-
-${VALIDATOR_SKILL_TEXT || '(Validator skill was not available at bridge startup — perform an enhanced version of S10 self-audit as the validator step.)'}`;
-
-  const parts = [instructions];
-  parts.push(`## Requested Mode\n${taskType || 'sql_generation'}`);
-
-  if (jiraInput?.project || jiraInput?.storyNumber) {
-    const storyRef = [jiraInput.project, jiraInput.storyNumber].filter(Boolean).join('-');
-    parts.push(`## Jira Story Reference\n${storyRef || JSON.stringify(jiraInput)}\n\nFetch this Jira story using the enabled native Jira MCP connector. Add the fetched story details to the working context before requirement analysis. Do not use custom connectors.`);
-  }
-
-  parts.push(`## Target BigQuery Scope\nProject ID: ${targetProject}\nDataset ID: ${targetDataset}\n\nThis target dataset is mandatory and is the hard boundary for BigQuery schema reconciliation, inference, generated object qualification, and dry-run validation. Inspect or infer only within \`${targetProject}.${targetDataset}\`. If the Jira story, file, or free text points to missing or ambiguous objects, ask for clarification instead of crawling other datasets.`);
-
-  if (contextText?.trim()) {
-    parts.push(`## Consolidated User Context\n${contextText.trim()}`);
-  }
-
-  if (messages && messages.length > 0) {
-    const recent = messages.slice(-MAX_HISTORY_MESSAGES);
-    parts.push('## Conversation History');
-    for (const msg of recent) {
-      const role = msg.role === 'user' ? 'User' : 'Assistant';
-      parts.push(`**${role}:** ${msg.content}`);
-    }
-  }
-
-  return parts.join('\n\n---\n\n');
+  // Composition is owned by prompt-assembler.js (single source of truth).
+  return promptAssembler.assembleGenerationPrompt(request, {
+    maxHistoryMessages: MAX_HISTORY_MESSAGES,
+    dialect: 'bigquery',
+  });
 }
 
 function buildPrompt(request) {
@@ -1602,6 +1411,11 @@ async function runClaude(prompt, sessionId, request, onEvent, ctx = {}, retryCou
     proc = spawn(claudeBin, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: buildClaudeEnv(),
+      // Run the session at the repo root so on-demand Reads of skill reference
+      // paths resolve and the layout matches what the Agent SDK will expect.
+      // The brain is injected by prompt-assembler.js regardless, so this does
+      // not depend on CLAUDE.md auto-load behaviour in headless mode.
+      cwd: promptAssembler.REPO_ROOT,
     });
     spawnedProcs.add(proc);
 
@@ -1763,8 +1577,32 @@ async function runClaude(prompt, sessionId, request, onEvent, ctx = {}, retryCou
       // OVERRIDES Claude's prose whenever they disagree. A hallucinated or
       // skipped dry-run therefore cannot produce a clean release.
       let validationSummary = null;
+      let stmBlock = null;
       if (hasSqlBlock) {
         validationSummary = extractValidationSummary(finalText, request);
+        stmBlock = (finalText.match(/```stm\s*\n([\s\S]*?)```/i) || [])[1] || null;
+      }
+
+      // Deterministic STM↔SQL structural check (LLM-free). Like the dry-run
+      // signal, this OVERRIDES the validator persona's prose stmCompleteness
+      // when it finds a concrete mechanical mismatch (a STM target column with
+      // no matching SELECT alias, or a STM source table not referenced).
+      let structuralVerdict = null;
+      if (hasSqlBlock && !isGithubDeploy && !isClarify) {
+        structuralVerdict = runStructuralChecks(sqlBlock, stmBlock);
+        const claudeStm = normalizeValidationStatus(validationSummary?.stmCompleteness?.status);
+        // Only downgrade, never upgrade: a deterministic fail/warning overrides a
+        // claimed pass; a deterministic pass leaves the persona's verdict intact
+        // (the persona also judges transformation fidelity the checker can't see).
+        const structuralWorse = combineValidationStatuses([claudeStm, structuralVerdict.status]) !== claudeStm;
+        if (validationSummary && structuralVerdict.status !== 'pass' && structuralWorse) {
+          validationSummary.stmCompleteness = {
+            status: structuralVerdict.status,
+            summary: `Bridge structural check: ${structuralVerdict.summary}`,
+            checks: structuralVerdict.checks.map((c) => `${c.name}: ${c.status} — ${c.detail}`),
+          };
+        }
+        metrics.incr('validation_status', { source: 'structural', status: structuralVerdict.status });
       }
 
       // Deterministic dry-run status from the raw tool results (not Claude prose).
@@ -1809,10 +1647,12 @@ async function runClaude(prompt, sessionId, request, onEvent, ctx = {}, retryCou
       const prematureJiraWrite = !!orderingState.jiraCommentBeforeDryRun;
 
       // Take the worst status across the validator sub-sections + the
-      // deterministic dry-run + the premature-Jira flag.
+      // deterministic STM↔SQL structural check + the deterministic dry-run +
+      // the premature-Jira flag.
       const validationStatus = combineValidationStatuses([
         validationSummary?.stmCompleteness?.status,
         validationSummary?.requirementCoverage?.status,
+        structuralVerdict ? structuralVerdict.status : 'pass',
         deterministicDryRun,
         prematureJiraWrite ? 'warning' : 'pass',
       ]);
@@ -1846,6 +1686,21 @@ async function runClaude(prompt, sessionId, request, onEvent, ctx = {}, retryCou
             source: 'claude',
           }),
         });
+        // Dedicated card when the deterministic STM↔SQL check found a mismatch.
+        if (structuralVerdict && structuralVerdict.status === 'fail') {
+          onEvent({
+            type: 'activity_event',
+            event: makeActivityEvent({
+              stage: 'validation',
+              type: 'validation',
+              status: 'failed',
+              title: 'STM ↔ SQL Check (bridge-verified) — fail',
+              summary: structuralVerdict.summary,
+              evidence: structuralVerdict.checks.map((c) => `${c.name}: ${c.detail}`),
+              source: 'bridge',
+            }),
+          });
+        }
         // Dedicated card when Claude skipped the mandatory S12 dry-run.
         if (deterministicDryRun === 'not_run') {
           onEvent({
@@ -2320,7 +2175,8 @@ const server = http.createServer(async (req, res) => {
       },
       features: {
         offlineDryRunEnabled: OFFLINE_DRY_RUN_ENABLED,
-        validatorSkillLoaded: VALIDATOR_SKILL_LOADED,
+        brainLoaded: BRAIN_STATUS.loaded,
+        brainLoadIssues: BRAIN_STATUS.issues.length,
       },
       lastError: bridgeState.lastErrorAt ? {
         atIso: new Date(bridgeState.lastErrorAt).toISOString(),

@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://sql-curator/contracts/validation.schema.json",
+  "title": "SQL Curator — Validation block",
+  "description": "Shape of the fenced ```validation JSON block. Section keys and the section-status enum match what the bridge consumes (normalizeValidationSummary + release-policy). sqlChecks.status is authored by Claude at S12 but the bridge overrides it from the real dry-run tool result; jiraTransition reflects the S13 result.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "activityLog": {
+      "type": "array",
+      "description": "Optional deduplicated summary of streamed activity cards.",
+      "items": { "$ref": "activity.schema.json" }
+    },
+    "activityDetails": {
+      "type": "array",
+      "description": "Concrete chronology lines (fetch, decomposition, schema, STM, SQL, validation, dry-run, fixes, Jira, ready).",
+      "items": { "type": "string" }
+    },
+    "inferences": {
+      "type": "array",
+      "items": { "$ref": "#/definitions/inference" }
+    },
+    "requirementCoverage": { "$ref": "#/definitions/section" },
+    "stmCompleteness": { "$ref": "#/definitions/section" },
+    "schemaReconciliation": { "$ref": "#/definitions/section" },
+    "sqlChecks": { "$ref": "#/definitions/section" },
+    "jiraTransition": { "$ref": "#/definitions/section" }
+  },
+  "definitions": {
+    "sectionStatus": {
+      "type": "string",
+      "enum": ["pass", "warning", "fail", "not_run"]
+    },
+    "section": {
+      "type": "object",
+      "required": ["status", "summary"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "$ref": "#/definitions/sectionStatus" },
+        "summary": { "type": "string" },
+        "checks": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "inference": {
+      "type": "object",
+      "required": ["claim", "confidence", "evidence"],
+      "additionalProperties": false,
+      "properties": {
+        "claim": { "type": "string", "description": "One material inference or assumption made during the run" },
+        "confidence": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "evidence": { "type": "string", "description": "Exact phrase, column name, or requirement sentence that drove this inference" }
+      }
+    }
+  }
+}

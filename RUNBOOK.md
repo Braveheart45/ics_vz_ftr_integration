@@ -2,7 +2,7 @@
 
 Deployment, configuration, monitoring, and incident response for the SQL Curator bridge + frontend.
 
-For application architecture and HTTP API reference, see [`README.md`](README.md). For Claude's operating contract, see [`skills/generator.md`](skills/generator.md).
+For application architecture and HTTP API reference, see [`README.md`](README.md). For Claude's operating contract, see the spine [`skills/sql-curator/SKILL.md`](skills/sql-curator/SKILL.md) and §1.2a below.
 
 ---
 
@@ -36,13 +36,51 @@ mini-services/claude-bridge/
   tool-helpers.js             MCP tool_result canonicaliser
   output-parsers.js           SQL / STM / clarification extractors
   release-policy.js           Release decision + validation-status helpers
+  structural-checks.js        Deterministic STM ↔ SQL structural check (bridge-side)
+  prompt-assembler.js         Composes the prompt from skills/ + contracts/ (the seam)
   tests/                      node --test suite
   .env.example                Annotated env-var reference
 ```
 
+### 1.2a Skill architecture (the agent's brain)
+
+The agent's operating contract is authored once under `skills/` and `contracts/` — it is **not**
+restated in the bridge prompt. `prompt-assembler.js` is the single seam that reads these files and
+composes the run prompt; the bridge never paraphrases skill content.
+
+```
+skills/
+  sql-curator/
+    SKILL.md                  Always-on orchestration spine (S01–S14) + frontmatter
+    references/
+      confidence-gate.md      S06 thresholds + two-tier vague-input policy
+      schema-reconciliation.md S04–S05 protocol + the two mandatory rationale cards
+      bigquery-idioms.md      S07a/S08/S09 detail + AS-alias mandate (the per-dialect fork unit)
+      clarification.md        Clarification block shape
+  validator/
+    SKILL.md                  S11 validator persona
+    references/
+      inference-soundness.md  Task-2 rubric
+contracts/
+  stm.schema.json             STM row shape (matches output-parsers.js extractStm)
+  validation.schema.json      validation block sections + status enum
+  activity.schema.json        streaming activity block + enums (match activity.js)
+  README.md                   interface + versioning + portability notes
+```
+
+Progressive disclosure is assembly-time and conditional: the spine + contracts are always
+included; the dialect idioms file is selected by `dialect` (today `bigquery`). Adding a warehouse
+= add `references/<dialect>-idioms.md` + a `DIALECT_IDIOMS` entry in `prompt-assembler.js`; no
+spine or orchestration edits. The agent↔bridge interface (field names + enums) is locked by
+`tests/contract-agreement.test.js`.
+
+**Portability:** `prompt-assembler.js` + the process spawn are the only CLI-specific pieces. A
+migration to the Claude Agent SDK replaces those two and consumes `skills/` + `contracts/`
+unchanged.
+
 ### 1.3 Validation
 
-Validation runs **inside one linear Claude session**, not as separate bridge-orchestrated layers. The flow is S01 intake → S02–S08 analysis/schema/STM/design → S09 SQL generation → S10 self-audit → **S11 validator persona** (a skeptical pass that reads `skills/validator.md`, re-checks requirements coverage + inference soundness + SQL↔STM alignment, and corrects the SQL inline if a concrete mismatch is found) → **S12 dry-run** → **S13 Jira** → S14 ready.
+Validation runs **inside one linear Claude session**, not as separate bridge-orchestrated layers. The flow is S01 intake → S02–S08 analysis/schema/STM/design → S09 SQL generation → S10 self-audit → **S11 validator persona** (a skeptical pass that reads `skills/validator/SKILL.md`, re-checks requirements coverage + inference soundness + SQL↔STM alignment, and corrects the SQL inline if a concrete mismatch is found) → **S12 dry-run** → **S13 Jira** → S14 ready.
 
 SQL is emitted to the UI whenever Claude returns a fenced SQL block. The bridge attaches a warning banner when validation did not cleanly pass.
 
@@ -51,7 +89,8 @@ The release status is the worst of:
 | Signal | Source | Owner |
 |---|---|---|
 | `requirementCoverage.status` | Claude's `validation` block (S11 Task 1) | Claude |
-| `stmCompleteness.status` | Claude's `validation` block (S11 Task 3) | Claude |
+| `stmCompleteness.status` | Claude's `validation` block (S11 Task 3) — **overridden** by the deterministic check below when that finds a concrete mismatch | Claude + Bridge |
+| Deterministic STM↔SQL check | `runStructuralChecks(sql, stm)` in `structural-checks.js` — every STM target column has a matching SELECT alias; every STM source table is referenced. Downgrades a claimed `pass` it can disprove | **Bridge** |
 | Deterministic dry-run | `deriveDryRunStatus(dryRunAttempts)` — reduces the raw `is_error` of every observed `execute_sql_readonly` to pass / fail / `not_run` | **Bridge** |
 | Premature-Jira flag | `orderingState.jiraCommentBeforeDryRun` — a Jira write before a passing dry-run pulls the run to `warning` | **Bridge** |
 
@@ -374,9 +413,9 @@ Active SSE streams are closed during the restart; clients receive `done {success
 
 ## 11. Updating the skill
 
-[`skills/generator.md`](skills/generator.md) is the operating contract Claude reads at the start of every session. Changes take effect on the next request — no bridge restart needed.
+The operating contract lives in `skills/` + `contracts/` and is composed by `prompt-assembler.js`. **The assembler caches every skill/contract file at bridge startup**, so editing a skill or contract requires a **bridge restart** to take effect (this changed when the brain moved out of per-request inlining). Edit the spine for orchestration/control-flow, a `references/` file for stage detail, or a `contracts/*.schema.json` for an artifact shape — then restart the bridge.
 
-For pid-level isolation between old and new contract behaviour during a rollout (e.g. a major SKILL change), restart the bridge after the file is in place.
+When changing a contract field/enum, update all four in lockstep: the schema in `contracts/`, the parser in the bridge, the skill reference prose, and `tests/contract-agreement.test.js` (which fails if they drift).
 
 ---
 
